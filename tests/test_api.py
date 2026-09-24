@@ -140,6 +140,25 @@ def test_strategy_meta_and_settings_roundtrip(api) -> None:
     assert client.put("/api/settings", json={"nope": 1}).status_code == 400
 
 
+def test_settings_version_lookup_and_restore(api) -> None:
+    client, repo, _, _ = api
+    base = client.get("/api/settings").json()["data"]
+    first = {"data": {**base, "candle_interval": "15m"}, "note": "첫 저장"}
+    second = {"data": {**base, "candle_interval": "240m"}, "note": "둘째"}
+    v1 = client.put("/api/settings", json=first).json()["version"]
+    v2 = client.put("/api/settings", json=second).json()["version"]
+    got = client.get(f"/api/settings/{v1}").json()
+    assert got["version"] == v1 and got["data"]["candle_interval"] == "15m" and got["note"] == "첫 저장"
+    assert client.get("/api/settings/99").status_code == 404
+    hist = client.get("/api/settings").json()["history"]
+    assert hist[0]["version"] == v2 and hist[0]["candle_interval"] == "240m" and hist[1]["strategy_name"] == "ma_cross"
+    # 되돌리기 = 이전 버전 내용을 새 버전으로 저장 (이력은 그대로)
+    restored = client.put("/api/settings", json={"data": got["data"], "note": f"v{v1} 설정 복원"}).json()
+    assert restored["version"] == v2 + 1
+    assert client.get("/api/settings").json()["data"]["candle_interval"] == "15m"
+    assert repo.load_runtime_settings_version(v2).data["candle_interval"] == "240m"
+
+
 def test_commands_and_start(api, monkeypatch) -> None:
     client, repo, _, _ = api
     r = client.post("/api/bot/pause")

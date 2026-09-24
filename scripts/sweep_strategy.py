@@ -1,8 +1,9 @@
-r"""전략 파라미터 스윕 — 최근 N년 캔들로 (마켓 × 캔들 단위 × 파라미터 × 리스크 오버레이) 백테스트를 돌려
-**연도별로** 단순 보유(B&H)와 비교한다. 한 구간의 최고 숫자가 아니라 "여러 해·여러 마켓에서 꾸준히 이기는 조합"을 찾기 위한 도구.
+r"""전략 파라미터 스윕 — 최근 N년 캔들로 (마켓 × 캔들 단위 × 파라미터 × 리스크 오버레이) 백테스트를
+돌려 **연도별로** 단순 보유(B&H)와 비교한다.
+한 구간의 최고 숫자가 아니라 "여러 해·여러 마켓에서 꾸준히 이기는 조합"을 찾기 위한 도구.
 
     .venv\Scripts\python.exe scripts\sweep_strategy.py --markets KRW-BTC,KRW-ETH,KRW-XRP --intervals 240m,1d --years 5
-    .venv\Scripts\python.exe scripts\sweep_strategy.py --overlays --top 6          # 상위 조합에 손절·추적 손절 오버레이 추가 검사
+    .venv\Scripts\python.exe scripts\sweep_strategy.py --overlays --top 6   # 상위 조합에 손절·추적 오버레이 검사
 
 결과: data/sweeps/<시각>_runs.csv(조합·마켓별 전체) + <시각>_summary.csv(조합별 집계) + 콘솔 상위 표.
 실제 주문 없음. 수수료 0.05%·슬리피지 0.05% 반영.
@@ -138,7 +139,10 @@ def summarize(rows: list[dict[str, Any]]) -> pd.DataFrame:
         })
     df = pd.DataFrame(out)
     # 점수: 연도별로 이긴 비율 → 마켓 전체에서 이긴 수 → 평균 초과수익 (최악 연도가 -30% 이하면 뒤로)
-    df["score"] = df["beat_ratio"] * 100 + df["markets_beaten"] * 10 + df["avg_excess"] * 10 + df["worst_year_excess"].clip(upper=0) * 20
+    df["score"] = (
+        df["beat_ratio"] * 100 + df["markets_beaten"] * 10 + df["avg_excess"] * 10
+        + df["worst_year_excess"].clip(upper=0) * 20
+    )
     return df.sort_values("score", ascending=False).reset_index(drop=True)
 
 
@@ -156,13 +160,15 @@ def fmt_pct(v: float) -> str:
 def print_table(df: pd.DataFrame, top: int) -> None:
     cols = ["interval", "label", "overlay", "beat_ratio", "seg_beats", "seg_total", "markets_beaten", "avg_return",
             "avg_bh", "avg_excess", "min_excess", "worst_year_excess", "avg_mdd", "trades", "avg_pf"]
-    print(f"{'캔들':<5} {'조합':<22} {'오버레이':<14} {'연도승':>7} {'마켓승':>5} {'평균수익':>9} {'평균B&H':>9} {'초과':>8} "
-          f"{'최소초과':>8} {'최악연도':>8} {'MDD':>7} {'거래':>5} {'PF':>5}")
+    head = (f"{'캔들':<5} {'조합':<22} {'오버레이':<14} {'연도승':>7} {'마켓승':>5} {'평균수익':>9} {'평균B&H':>9} "
+            f"{'초과':>8} {'최소초과':>8} {'최악연도':>8} {'MDD':>7} {'거래':>5} {'PF':>5}")
+    print(head)
     for _, r in df[cols].head(top).iterrows():
-        print(f"{r['interval']:<5} {r['label']:<22} {r['overlay']:<14} {int(r['seg_beats']):>3}/{int(r['seg_total']):<3} "
-              f"{int(r['markets_beaten']):>5} {fmt_pct(r['avg_return']):>9} {fmt_pct(r['avg_bh']):>9} {fmt_pct(r['avg_excess']):>8} "
-              f"{fmt_pct(r['min_excess']):>8} {fmt_pct(r['worst_year_excess']):>8} {fmt_pct(r['avg_mdd']):>7} {int(r['trades']):>5} "
-              f"{r['avg_pf']:>5.2f}")
+        seg = f"{int(r['seg_beats']):>3}/{int(r['seg_total']):<3}"
+        print(f"{r['interval']:<5} {r['label']:<22} {r['overlay']:<14} {seg} {int(r['markets_beaten']):>5} "
+              f"{fmt_pct(r['avg_return']):>9} {fmt_pct(r['avg_bh']):>9} {fmt_pct(r['avg_excess']):>8} "
+              f"{fmt_pct(r['min_excess']):>8} {fmt_pct(r['worst_year_excess']):>8} {fmt_pct(r['avg_mdd']):>7} "
+              f"{int(r['trades']):>5} {r['avg_pf']:>5.2f}")
 
 
 async def main() -> int:
@@ -182,8 +188,9 @@ async def main() -> int:
     intervals = [CandleInterval.parse(i.strip()) for i in args.intervals.split(",") if i.strip()]
     end = datetime.now(UTC)
     start = end - timedelta(days=365.25 * args.years)
-    print(f"=== 스윕: {', '.join(markets)} × {', '.join(i.value for i in intervals)} · "
-          f"{start.astimezone(KST):%Y-%m-%d} ~ {end.astimezone(KST):%Y-%m-%d} · 수수료 {FEE:.2%} 슬리피지 {SLIPPAGE:.2%} ===")
+    span = f"{start.astimezone(KST):%Y-%m-%d} ~ {end.astimezone(KST):%Y-%m-%d}"
+    print(f"=== 스윕: {', '.join(markets)} × {', '.join(i.value for i in intervals)} · {span} · "
+          f"수수료 {FEE:.2%} 슬리피지 {SLIPPAGE:.2%} ===")
 
     frames: dict[tuple[str, str], pd.DataFrame] = {}
     for market in markets:
@@ -236,15 +243,21 @@ async def main() -> int:
         print("\n=== 2단계 결과 (오버레이 포함) ===")
         print_table(summary, args.top)
 
-    out_dir = Path(args.out_dir)
+    save_outputs(Path(args.out_dir), rows, summary)
+    return 0
+
+
+def save_outputs(out_dir: Path, rows: list[dict[str, Any]], summary: pd.DataFrame) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(KST).strftime("%Y%m%d_%H%M%S")
-    runs_df = pd.DataFrame([{**{k: v for k, v in r.items() if k not in ("segments",)},
-                             "segments": {y: (round(s, 4), round(b, 4)) for y, (s, b) in r["segments"].items()}} for r in rows])
+    runs_df = pd.DataFrame([
+        {**{k: v for k, v in r.items() if k != "segments"},
+         "segments": {y: (round(s, 4), round(b, 4)) for y, (s, b) in r["segments"].items()}}
+        for r in rows
+    ])
     runs_df.to_csv(out_dir / f"{stamp}_runs.csv", index=False, encoding="utf-8-sig")
     summary.to_csv(out_dir / f"{stamp}_summary.csv", index=False, encoding="utf-8-sig")
     print(f"\n저장: {out_dir / (stamp + '_runs.csv')}, {out_dir / (stamp + '_summary.csv')}")
-    return 0
 
 
 if __name__ == "__main__":

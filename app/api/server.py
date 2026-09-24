@@ -53,6 +53,14 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
     backtests = backtests or BacktestRunner(settings)
 
     app = FastAPI(title="upbit-auto-trader 대시보드", version="0.8")
+
+    @app.middleware("http")
+    async def _revalidate_static(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """화면 파일은 갱신 후 바로 반영되도록 매번 재검증(ETag)한다 — 브라우저가 옛 app.js 를 쓰는 사고 방지."""
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
     app.state.settings = settings
     app.state.db = db
     app.state.service = service
@@ -198,13 +206,36 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
     async def api_settings(mode: str = Depends(mode_param)) -> dict[str, Any]:
         runtime, version = _current_runtime(mode)
         history = [
-            {"version": h.version, "note": h.note, "created_at": from_db_time(h.created_at).astimezone(KST).isoformat()}
-            for h in service.repo(mode).runtime_settings_history(20)
+            {
+                "version": h.version, "note": h.note,
+                "created_at": from_db_time(h.created_at).astimezone(KST).isoformat(),
+                "strategy_name": (h.data or {}).get("strategy_name"),
+                "candle_interval": (h.data or {}).get("candle_interval"),
+                "markets": (h.data or {}).get("markets") or [],
+            }
+            for h in service.repo(mode).runtime_settings_history(50)
         ]
         return {
             "version": version, "data": runtime.to_dict(), "history": history,
             "hot_fields": ["strategy_name", "strategy_params", "risk"],
             "restart_fields": ["markets", "candle_interval"],
+        }
+
+    @app.get("/api/settings/{version}")
+    async def api_settings_version(version: int, mode: str = Depends(mode_param)) -> dict[str, Any]:
+        """이력의 특정 버전 내용. 화면에서 불러오거나(폼) 새 버전으로 다시 저장(되돌리기)하는 데 쓴다."""
+        record = service.repo(mode).load_runtime_settings_version(version)
+        if record is None:
+            raise HTTPException(status_code=404, detail=f"실행 설정 v{version} 이 없습니다")
+        try:
+            runtime = RuntimeSettings(**(record.data or {}))
+        except ValidationError as exc:
+            reason = exc.errors()[0].get("msg", str(exc))
+            detail = f"v{version} 은 현재 코드로 검증되지 않습니다: {reason}"
+            raise HTTPException(status_code=422, detail=detail) from exc
+        return {
+            "version": record.version, "note": record.note,
+            "created_at": from_db_time(record.created_at).astimezone(KST).isoformat(), "data": runtime.to_dict(),
         }
 
     @app.put("/api/settings", dependencies=[Depends(require_auth)])

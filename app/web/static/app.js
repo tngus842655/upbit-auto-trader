@@ -51,6 +51,7 @@
         picker: { open: false, loading: false, error: null, data: null, query: "", onlySelected: false, selected: new Set(), target: "settings",
           sort: { key: "acc_trade_price_24h", desc: true } },
         marketCatalog: {},  // 코드 → 한글 이름
+        loadedVersion: null,  // 이력에서 폼에 불러온 버전
         // 백테스트 탭
         bt: { marketsText: "", interval: "", years: {}, recent: { 3: false, 6: false, 12: false }, custom: { enabled: false, start: "", end: "" },
           capital: 1000000, feePct: 0.05, slippagePct: 0.05, useRisk: false, submitting: false, error: null,
@@ -171,18 +172,38 @@
         try {
           const s = await this.api("/api/settings");
           this.settingsVersion = s.version; this.settingsHistory = s.history;
-          const d = s.data;
-          const riskEnabled = {};
-          for (const f of schemaFields(this.meta.risk_schema)) riskEnabled[f.name] = d.risk[f.name] != null;
-          this.form = { marketsText: d.markets.join(","), candle_interval: d.candle_interval, strategy_name: d.strategy_name,
-            strategy_params: Object.assign({}, d.strategy_params), risk: Object.assign({}, d.risk), riskEnabled, note: "" };
-          // 파라미터 기본값 채우기
-          for (const f of schemaFields(this.meta.schemas[d.strategy_name])) if (this.form.strategy_params[f.name] == null) this.form.strategy_params[f.name] = f.default;
-          this.saveResult = null; this.formErrors = [];
+          this.fillForm(s.data, "");
+          this.loadedVersion = null;
           if (!this.picker.data && !this.picker.loading) this.loadMarketCatalog();  // 선택된 마켓의 한글 이름 표시용
           this.syncBacktestFromSettings();
           if (!this.btDefaults.years.length) this.loadBacktestDefaults();
         } catch (e) { this.notify("설정 조회 실패: " + e.message, "bad"); }
+      },
+      fillForm(d, note) {
+        const riskEnabled = {};
+        for (const f of schemaFields(this.meta.risk_schema)) riskEnabled[f.name] = d.risk[f.name] != null;
+        this.form = { marketsText: d.markets.join(","), candle_interval: d.candle_interval, strategy_name: d.strategy_name,
+          strategy_params: Object.assign({}, d.strategy_params), risk: Object.assign({}, d.risk), riskEnabled, note: note || "" };
+        // 파라미터 기본값 채우기
+        for (const f of schemaFields(this.meta.schemas[d.strategy_name])) if (this.form.strategy_params[f.name] == null) this.form.strategy_params[f.name] = f.default;
+        this.saveResult = null; this.formErrors = [];
+      },
+      async loadSettingsVersion(v) {
+        try {
+          const s = await this.api(`/api/settings/${v}`);
+          this.fillForm(s.data, `v${v} 설정 복원`); this.loadedVersion = v;
+          this.notify(`v${v} 설정을 불러왔습니다. 저장을 누르면 새 버전으로 적용됩니다`, "ok");
+        } catch (e) { this.notify("불러오기 실패: " + e.message, "bad"); }
+      },
+      async restoreSettingsVersion(v) {
+        if (!confirm(`v${v} 설정을 새 버전으로 바로 저장합니다. 계속할까요?`)) return;
+        try {
+          const s = await this.api(`/api/settings/${v}`);
+          const r = await this.api("/api/settings", { method: "PUT", body: { data: s.data, note: `v${v} 설정 복원` } });
+          await this.loadSettings();
+          this.saveResult = r;
+          this.notify(`v${r.version} 저장됨 (v${v} 복원)`, "ok");
+        } catch (e) { this.notify("되돌리기 실패: " + e.message, "bad"); }
       },
       resetParams() {
         const params = {};

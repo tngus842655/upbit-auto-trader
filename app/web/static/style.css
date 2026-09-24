@@ -108,3 +108,12 @@ table.bt tr.sel td { background: rgba(79, 140, 255, 0.12); }
 .kpis.bt { margin-bottom: 10px; }
 label.inline { display: inline-flex; align-items: center; gap: 4px; }
 .note.small { font-size: 12px; }
+
+/* ---------- 설정 이력 ---------- */
+td.nowrap { white-space: nowrap; }
+table tr.sel td { background: rgba(79, 140, 255, 0.12); }
+table.history { table-layout: fixed; width: 100%; }
+table.history td, table.history th { overflow: hidden; }
+td.ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
+.history-scroll { max-height: 418px; overflow-y: auto; overflow-x: hidden; }  /* 헤더 + 10줄 */
+.history-scroll thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }

@@ -231,6 +231,7 @@
             </label>
           </div>
           <label class="field"><span>변경 메모</span><input v-model="form.note" placeholder="예: 손절 3%로 축소"></label>
+          <div v-if="loadedVersion" class="note">v{{ loadedVersion }} 설정을 불러왔습니다. 내용을 확인한 뒤 <b>저장</b>을 누르면 새 버전으로 적용됩니다.</div>
           <div class="actions">
             <button class="primary" @click="saveSettings" :disabled="saving">{{ saving ? '저장 중…' : '저장 (다음 거래부터 적용)' }}</button>
             <button @click="loadSettings">되돌리기</button>
@@ -242,11 +243,25 @@
         </div>
       </div>
       <div class="card">
-        <h3>변경 이력</h3>
-        <table>
-          <thead><tr><th>버전</th><th>시각</th><th>메모</th></tr></thead>
-          <tbody><tr v-for="h in settingsHistory" :key="h.version"><td>v{{ h.version }}</td><td>{{ fmtTime(h.created_at) }}</td><td>{{ h.note }}</td></tr></tbody>
+        <h3>변경 이력 <span class="muted small">최근 {{ settingsHistory.length }}개 · 10개 넘으면 표 안에서 스크롤</span></h3>
+        <div class="history-scroll">
+        <table class="history">
+          <colgroup><col style="width:72px"><col style="width:168px"><col style="width:150px"><col><col style="width:150px"></colgroup>
+          <thead><tr><th>버전</th><th>시각</th><th>내용</th><th>메모</th><th></th></tr></thead>
+          <tbody>
+            <tr v-for="h in settingsHistory" :key="h.version" :class="{ sel: h.version === settingsVersion }">
+              <td>v{{ h.version }}<span v-if="h.version === settingsVersion" class="muted small"> (현재)</span></td>
+              <td>{{ fmtTime(h.created_at) }}</td>
+              <td class="small ellipsis" :title="h.strategy_name + ' · ' + h.candle_interval + ' · ' + (h.markets || []).join(', ')">{{ h.strategy_name }} · {{ h.candle_interval }} · {{ (h.markets || []).length }}마켓</td>
+              <td class="small muted ellipsis" :title="h.note">{{ h.note }}</td>
+              <td class="nowrap">
+                <button class="small" @click="loadSettingsVersion(h.version)" title="폼에 불러오기 — 저장을 눌러야 적용됩니다">불러오기</button>
+                <button class="small" @click="restoreSettingsVersion(h.version)" :disabled="h.version === settingsVersion" title="이 설정을 새 버전으로 바로 저장합니다">바로 적용</button>
+              </td>
+            </tr>
+          </tbody>
         </table>
+        </div>
         <h3 class="mt">.env 로만 바꾸는 값</h3>
         <table class="kv">
           <tr><th>거래 모드 (TRADING_MODE)</th><td>{{ envModeLabel(status.env_mode) }}</td></tr>

@@ -321,6 +321,14 @@ class Repository:
             record = s.execute(stmt.order_by(BotSettingsRecord.version.desc()).limit(1)).scalar_one_or_none()
             return (dict(record.data), record.version) if record else None
 
+    def load_runtime_settings_version(self, version: int) -> BotSettingsRecord | None:
+        """특정 버전의 실행 설정 기록 (대시보드 이력에서 불러오기·되돌리기용)."""
+        with self.db.session() as s:
+            stmt = select(BotSettingsRecord).where(
+                BotSettingsRecord.mode == self.mode, BotSettingsRecord.version == version
+            )
+            return s.execute(stmt).scalar_one_or_none()
+
     def runtime_settings_history(self, limit: int = 20) -> list[BotSettingsRecord]:
         with self.db.session() as s:
             stmt = select(BotSettingsRecord).where(BotSettingsRecord.mode == self.mode)
