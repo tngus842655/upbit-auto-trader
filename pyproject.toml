@@ -10,6 +10,8 @@ dependencies = [
     "pydantic-settings>=2.10,<3.0",
     "websockets>=15,<17",
     "SQLAlchemy>=2.0,<3.0",
+    "fastapi>=0.115,<1.0",
+    "uvicorn[standard]>=0.30,<1.0",
     "pandas>=2.2,<3.0",
     "numpy>=2.0,<3.0",
 ]
@@ -39,6 +41,10 @@ src = ["."]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "ASYNC"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI 의 Body() 는 Depends()/Query() 처럼 선언용 싱글턴 호출이다
+extend-immutable-calls = ["fastapi.Body"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app", "tests"]

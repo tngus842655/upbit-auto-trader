@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from pydantic import ValidationError
+
 from app.config.settings import Settings, TradingMode
 from app.core.exceptions import ConfigError, TraderError
 from app.database.repository import Repository
@@ -38,6 +40,7 @@ from app.trading.live_broker import LiveBroker
 from app.trading.market_state import MarketState
 from app.trading.orders import Order, OrderRequest, PaperBroker
 from app.trading.portfolio import Portfolio, Side
+from app.trading.runtime_settings import RuntimeSettings
 
 log = logging.getLogger(__name__)
 
@@ -92,6 +95,8 @@ class TradingEngine:
         sleep: Sleeper = asyncio.sleep,
         warmup_candles: int | None = None,
         refresh_candles: int = 5,
+        runtime: RuntimeSettings | None = None,
+        settings_version: int = 0,
     ) -> None:
         if settings.trading_mode is TradingMode.PAPER:
             if not isinstance(broker, PaperBroker):
@@ -137,8 +142,12 @@ class TradingEngine:
         self.command_poll_interval = 2.0
         self.heartbeat_interval = 10.0
         self._last_command_poll: datetime | None = None
+        self._reload_requested = False
         self._last_heartbeat: datetime | None = None
         self.last_trade_at: datetime | None = None
+        self.runtime = runtime
+        self.settings_version = settings_version
+        self.restart_required = False
 
     # ------------------------------------------------------------------
     # 준비
@@ -363,6 +372,48 @@ class TradingEngine:
         return equity
 
     # ------------------------------------------------------------------
+    # 실행 설정 핫리로드 (대시보드가 저장한 새 버전을 다음 캔들부터 반영)
+    # ------------------------------------------------------------------
+    async def maybe_reload_settings(self) -> dict[str, list[str]] | None:
+        if self.runtime is None:
+            return None
+        latest = self.repo.runtime_settings_version()
+        if latest <= self.settings_version:
+            return None
+        loaded = self.repo.load_runtime_settings()
+        if loaded is None:
+            return None
+        data, version = loaded
+        try:
+            new = RuntimeSettings(**data)
+        except ValidationError as exc:
+            self.settings_version = version  # 잘못된 버전은 건너뛰고 다음 저장을 기다린다
+            log.error("설정 v%d 무시(검증 실패): %s", version, exc)
+            self.repo.log("ERROR", "settings_invalid", f"v{version} 검증 실패: {exc}")
+            return None
+        changes = self.runtime.changes_vs(new)
+        if "strategy_name" in changes["hot"] or "strategy_params" in changes["hot"]:
+            self.strategy = new.build_strategy()
+            self.warmup_candles = max(self.warmup_candles, self.strategy.warmup_periods + 5)
+            short = [
+                m for m in self.markets
+                if (df := self.state.frame(m)) is None or len(df) < self.strategy.warmup_periods + 1
+            ]
+            if short:
+                await self.warmup()
+        if "risk" in changes["hot"] and isinstance(self.risk, RiskManager):
+            self.risk.config = new.risk
+        if changes["restart"]:
+            self.restart_required = True
+        self.runtime = new
+        self.settings_version = version
+        message = f"설정 v{version} 반영: 즉시 {changes['hot'] or '없음'}, 재시작 필요 {changes['restart'] or '없음'}"
+        log.info(message)
+        self.repo.log("INFO", "settings_applied", message, {"version": version, **changes})
+        self.write_heartbeat()
+        return changes
+
+    # ------------------------------------------------------------------
     # 대시보드 이음새: 하트비트 · 명령 큐
     # ------------------------------------------------------------------
     @property
@@ -384,8 +435,10 @@ class TradingEngine:
             status=status, strategy=self.strategy.name, markets=list(self.markets), interval=self.interval.value,
             started_at=self.stats.started_at, api_ok=self.stats.errors == 0 or self.stats.last_candle_check is not None,
             ws_status=self.ws_status, last_data_at=self.last_data_at(), last_candle_at=self.stats.last_candle_check,
-            last_trade_at=self.last_trade_at, equity=equity, cash=self.portfolio.cash, message=message,
+            last_trade_at=self.last_trade_at, equity=equity, cash=self.portfolio.cash,
+            message=message or ("재시작 필요: 마켓/캔들 단위 변경" if self.restart_required else ""),
             risk=risk_snapshot["state"] if risk_snapshot else None, pid=os.getpid(),
+            settings_version=self.settings_version, restart_required=self.restart_required,
         )
         self.stats.heartbeats += 1
         self._last_heartbeat = self.clock()
@@ -411,6 +464,9 @@ class TradingEngine:
                         self.risk.halt(str(args.get("reason") or "수동 긴급 정지"))
                     self.paused = True
                     result = "긴급 정지: 신규 진입 차단 + 일시정지"
+                elif name == "reload":
+                    result = "설정 다시 읽기 예약 (다음 캔들 경계에 반영)"
+                    self._reload_requested = True
                 elif name == "resume_risk":
                     if isinstance(self.risk, RiskManager):
                         self.risk.resume()
@@ -456,6 +512,11 @@ class TradingEngine:
         start_msg = f"{self.mode} 시작: {self.strategy.name} {self.markets} {self.interval.value}"
         start_data = {"params": self.strategy.params.model_dump(), "cash": self.portfolio.cash}
         self.repo.log("INFO", "bot_start", start_msg, start_data)
+        # 엔진이 꺼져 있는 동안 큐에 쌓인 명령(예: 죽은 엔진에 보낸 stop)은 새 실행에 적용하지 않는다
+        stale = self.repo.discard_pending_commands("무시: 엔진 시작 전에 들어온 명령")
+        if stale:
+            self.repo.log("WARNING", "stale_commands", f"시작 전 대기 명령 {stale}건 무시", {"count": stale})
+            log.warning("엔진 시작 전 대기 명령 %d건 무시", stale)
         self.write_heartbeat("STARTING")
         await self.warmup()
         if isinstance(self.broker, LiveBroker):
@@ -489,6 +550,13 @@ class TradingEngine:
                 self.poll_commands()
                 if self._stop.is_set():
                     break
+                if self._reload_requested:
+                    self._reload_requested = False
+                    try:
+                        await self.maybe_reload_settings()
+                    except TraderError as exc:
+                        self.stats.errors += 1
+                        log.error("설정 다시 읽기 실패: %s", exc)
                 heartbeat_due = self._last_heartbeat is None or (
                     (now - self._last_heartbeat).total_seconds() >= self.heartbeat_interval
                 )
@@ -498,6 +566,7 @@ class TradingEngine:
                     try:
                         await self.ensure_prices(now)
                         await self.check_exits(now, force=True)
+                        await self.maybe_reload_settings()
                         await self.process_closed_candles(now)
                     except TraderError as exc:
                         self.stats.errors += 1

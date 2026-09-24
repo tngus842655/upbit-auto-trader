@@ -17,6 +17,7 @@ from app.database.models import (
     BalanceSnapshot,
     BotCommand,
     BotLog,
+    BotSettingsRecord,
     CandleRecord,
     EngineStatus,
     FillRecord,
@@ -280,12 +281,59 @@ class Repository:
             stmt = select(BotCommand).where(BotCommand.mode == self.mode, BotCommand.processed_at.is_(None))
             return list(s.execute(stmt.order_by(BotCommand.created_at)).scalars())
 
+    def discard_pending_commands(self, result: str) -> int:
+        """대기 중인 명령을 전부 처리됨으로 표시한다(엔진 시작 시 오래된 명령 무시용). 건수를 돌려준다."""
+        with self.db.session() as s:
+            stmt = select(BotCommand).where(BotCommand.mode == self.mode, BotCommand.processed_at.is_(None))
+            now = datetime.now(UTC).replace(tzinfo=None)
+            count = 0
+            for record in s.execute(stmt).scalars():
+                record.processed_at = now
+                record.result = result
+                count += 1
+            return count
+
     def mark_command(self, command_id: int, result: str) -> None:
         with self.db.session() as s:
             record = s.get(BotCommand, command_id)
             if record is not None:
                 record.processed_at = datetime.now(UTC).replace(tzinfo=None)
                 record.result = result
+
+    # ------------------------------------------------------------------
+    # 실행 설정 (bot_settings)
+    # ------------------------------------------------------------------
+    def runtime_settings_version(self) -> int:
+        with self.db.session() as s:
+            stmt = select(BotSettingsRecord.version).where(BotSettingsRecord.mode == self.mode)
+            latest = s.execute(stmt.order_by(BotSettingsRecord.version.desc()).limit(1)).scalar_one_or_none()
+            return int(latest or 0)
+
+    def save_runtime_settings(self, data: dict[str, Any], note: str = "") -> int:
+        version = self.runtime_settings_version() + 1
+        with self.db.session() as s:
+            s.add(BotSettingsRecord(mode=self.mode, version=version, data=data, note=note))
+        return version
+
+    def load_runtime_settings(self) -> tuple[dict[str, Any], int] | None:
+        with self.db.session() as s:
+            stmt = select(BotSettingsRecord).where(BotSettingsRecord.mode == self.mode)
+            record = s.execute(stmt.order_by(BotSettingsRecord.version.desc()).limit(1)).scalar_one_or_none()
+            return (dict(record.data), record.version) if record else None
+
+    def runtime_settings_history(self, limit: int = 20) -> list[BotSettingsRecord]:
+        with self.db.session() as s:
+            stmt = select(BotSettingsRecord).where(BotSettingsRecord.mode == self.mode)
+            return list(s.execute(stmt.order_by(BotSettingsRecord.version.desc()).limit(limit)).scalars())
+
+    def balance_series(self, since: datetime | None = None, limit: int = 5000) -> list[BalanceSnapshot]:
+        """자산 스냅샷 시계열(오래된 순). 대시보드 차트·성과 계산용."""
+        with self.db.session() as s:
+            stmt = select(BalanceSnapshot).where(BalanceSnapshot.mode == self.mode)
+            if since is not None:
+                stmt = stmt.where(BalanceSnapshot.time >= to_db_time(since))
+            rows = list(s.execute(stmt.order_by(BalanceSnapshot.time.desc()).limit(limit)).scalars())
+            return list(reversed(rows))
 
     def count_rows(self, model: type) -> int:
         with self.db.session() as s:

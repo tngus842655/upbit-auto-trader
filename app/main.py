@@ -16,6 +16,7 @@ Phase 1 에서는 연결 점검용 명령만 제공한다. 실제 매매 루프(
     python -m app.main control pause|resume|stop|halt|resume-risk             # 실행 중 엔진 제어 (Phase 7)
     python -m app.main order-test KRW-BTC --amount 5000                       # 주문 테스트 API (실제 주문 없음)
     python -m app.main run --confirm-live REAL-MONEY                          # LIVE (이중 플래그 + 확인 문구)
+    python -m app.main serve                                                  # 대시보드 http://127.0.0.1:8000 (Phase 8)
 """
 
 from __future__ import annotations
@@ -30,7 +31,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from app.backtest import BacktestConfig, BacktestEngine, format_report, load_candles, save_result
-from app.config.settings import Settings, TradingMode, get_settings, parse_params_text
+from app.config.settings import PROJECT_ROOT, Settings, TradingMode, get_settings, parse_params_text
 from app.core.exceptions import ConfigError, TraderError
 from app.core.logging import setup_logging
 from app.database import Database, Repository
@@ -44,8 +45,10 @@ from app.strategy import check_no_lookahead, create_strategy
 from app.strategy.data import candles_to_dataframe, detect_price_anomalies, drop_unclosed, validate_candles
 from app.trading.engine import TradingEngine
 from app.trading.live_broker import LiveBroker, portfolio_from_accounts
+from app.trading.live_guard import LIVE_CONFIRM_PHRASE
 from app.trading.orders import PaperBroker
 from app.trading.portfolio import DEFAULT_MIN_ORDER_AMOUNT
+from app.trading.runtime_settings import RuntimeSettings
 
 log = logging.getLogger(__name__)
 
@@ -256,6 +259,26 @@ def _kst_str(value: datetime | None) -> str:
     return from_db_time(value).astimezone(KST).strftime("%Y-%m-%d %H:%M:%S") if value else "-"
 
 
+def load_runtime_settings(
+    settings: Settings, repo: Repository, overrides: dict | None = None
+) -> tuple[RuntimeSettings, int]:
+    """DB 의 최신 실행 설정을 읽고, 없으면 .env 값으로 버전 1 을 만든다. CLI 로 넘긴 값은 이번 실행에만 덮어쓴다."""
+    loaded = repo.load_runtime_settings()
+    if loaded is not None:
+        data, version = loaded
+        try:
+            runtime = RuntimeSettings(**data)
+        except Exception as exc:  # noqa: BLE001 - 잘못된 저장값은 .env 로 대체
+            print(f"[경고] DB 실행 설정 v{version} 이 잘못되어 .env 값을 사용합니다: {exc}", file=sys.stderr)
+            runtime = RuntimeSettings.from_settings(settings)
+    else:
+        runtime = RuntimeSettings.from_settings(settings)
+        version = repo.save_runtime_settings(runtime.to_dict(), note=".env 초기값")
+    if overrides:
+        runtime = RuntimeSettings(**{**runtime.to_dict(), **overrides})
+    return runtime, version
+
+
 def build_paper_components(settings: Settings):
     """DB · 저장소 · 모의 계좌(복구 포함) · 브로커 · 리스크를 만든다."""
     db = Database(settings.database_url)
@@ -271,9 +294,6 @@ def build_paper_components(settings: Settings):
     )
     risk = RiskManager(settings.risk_config())
     return db, repo, portfolio, broker, risk, restored
-
-
-LIVE_CONFIRM_PHRASE = "REAL-MONEY"
 
 
 async def build_live_components(settings: Settings, client: UpbitClient, markets: list[str]):
@@ -297,14 +317,7 @@ async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
     if settings.trading_mode is TradingMode.BACKTEST:
         print("run 은 PAPER/LIVE 전용입니다. BACKTEST 는 backtest 명령을 쓰세요.", file=sys.stderr)
         return 2
-    markets = args.markets or settings.markets
-    interval = CandleInterval.parse(args.interval or settings.candle_interval)
-    params = dict(settings.strategy_params)
-    if args.params:
-        params.update(parse_params_text(args.params))
-    strategy = create_strategy(args.strategy or settings.strategy_name, params)
     print_settings(settings)
-
     live = settings.trading_mode is TradingMode.LIVE
     if live:
         if not settings.is_live_trading_allowed:
@@ -324,11 +337,31 @@ async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
 
     try:
         async with UpbitClient.from_settings(settings) as client:
+            mode = "live" if live else "paper"
+            settings_db = Database(settings.database_url)
+            settings_db.create_all()
+            overrides: dict = {}
+            if args.markets:
+                overrides["markets"] = args.markets
+            if args.strategy:
+                overrides["strategy_name"] = args.strategy
+            if args.interval:
+                overrides["candle_interval"] = args.interval
+            if args.params:
+                overrides["strategy_params"] = parse_params_text(args.params)
+            runtime, version = load_runtime_settings(settings, Repository(settings_db, mode=mode), overrides)
+            settings_db.dispose()
+            markets = runtime.markets
+            interval = runtime.interval
+            strategy = runtime.build_strategy()
             if live:
                 db, repo, portfolio, broker, risk, restored = await build_live_components(settings, client, markets)
             else:
                 db, repo, portfolio, broker, risk, restored = build_paper_components(settings)
+            risk = RiskManager(runtime.risk)
             try:
+                override_note = ", CLI 값으로 일부 덮어씀" if overrides else ""
+                print(f"  실행 설정 v{version} (DB bot_settings{override_note})")
                 label = "실거래" if live else "모의매매"
                 print(f"=== {label} 시작: {strategy.name} {strategy.params.model_dump()} ===")
                 print(f"  대상 {', '.join(markets)} {interval.value}")
@@ -346,6 +379,7 @@ async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
                     settings, strategy=strategy, portfolio=portfolio, broker=broker, risk=risk, repo=repo,
                     client=client, markets=markets, interval=interval,
                     ws_factory=lambda subs: UpbitWebSocket(subs, url=settings.upbit_ws_url),
+                    runtime=runtime, settings_version=version,
                 )
                 stats = await engine.run(duration_seconds=args.duration or None)
             finally:
@@ -478,6 +512,23 @@ async def cmd_status(settings: Settings, args: argparse.Namespace) -> int:
     return 0
 
 
+async def cmd_serve(settings: Settings, args: argparse.Namespace) -> int:
+    """대시보드 웹 서버 (엔진과 별도 프로세스). 매매는 하지 않는다."""
+    import uvicorn
+
+    from app.api.server import create_app
+
+    host = args.host or settings.dashboard_host
+    port = args.port or settings.dashboard_port
+    if host not in ("127.0.0.1", "localhost", "::1") and settings.dashboard_token is None:
+        print("외부 인터페이스에 바인드하려면 .env 에 DASHBOARD_TOKEN 을 설정하세요.", file=sys.stderr)
+        return 2
+    print(f"대시보드: http://{host}:{port}  (모드 표시는 화면에서 선택, 엔진 시작은 제어 탭)")
+    config = uvicorn.Config(create_app(settings), host=host, port=port, log_level="info", access_log=False)
+    await uvicorn.Server(config).serve()
+    return 0
+
+
 async def cmd_stream(settings: Settings, args: argparse.Namespace) -> int:
     """실시간 스트림을 화면에 출력한다 (Public 엔드포인트, 주문 없음)."""
     markets = args.markets or settings.markets
@@ -595,7 +646,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_status.set_defaults(func=cmd_status)
 
     p_ctl = sub.add_parser("control", help="실행 중인 엔진에 명령 전송 (pause / resume / stop / halt / resume-risk)")
-    p_ctl.add_argument("command", choices=["pause", "resume", "stop", "halt", "resume-risk"])
+    p_ctl.add_argument("command", choices=["pause", "resume", "stop", "halt", "resume-risk", "reload"])
     p_ctl.add_argument("--mode", choices=["paper", "live"], default="paper")
     p_ctl.add_argument("--reason", help="halt 사유")
     p_ctl.set_defaults(func=cmd_control)
@@ -606,6 +657,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_ot.add_argument("--amount", type=float, default=5000, help="매수 테스트 금액 KRW (기본 5000)")
     p_ot.add_argument("--volume", type=float, default=0.0001, help="매도 테스트 수량")
     p_ot.set_defaults(func=cmd_order_test)
+
+    p_serve = sub.add_parser("serve", help="대시보드 웹 서버 실행 (기본 http://127.0.0.1:8000)")
+    p_serve.add_argument("--host", help="바인드 주소 (기본 DASHBOARD_HOST=127.0.0.1)")
+    p_serve.add_argument("--port", type=int, help="포트 (기본 DASHBOARD_PORT=8000)")
+    p_serve.set_defaults(func=cmd_serve)
 
     p_stream = sub.add_parser("stream", help="WebSocket 실시간 시세 출력 (주문 없음)")
     p_stream.add_argument("markets", nargs="*", help="마켓 코드 (생략 시 설정의 MARKETS)")
@@ -625,7 +681,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Exception as exc:  # pydantic ValidationError 등 설정 오류
         print(f"설정 오류: {exc}", file=sys.stderr)
         return 2
-    setup_logging(settings.log_level, settings.log_dir)
+    log_dir = settings.log_dir if settings.log_dir.is_absolute() else PROJECT_ROOT / settings.log_dir
+    setup_logging(settings.log_level, log_dir)
     log.info(
         "시작: command=%s mode=%s live_allowed=%s",
         args.command, settings.trading_mode.value, settings.is_live_trading_allowed,

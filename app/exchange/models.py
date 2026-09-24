@@ -20,7 +20,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 KST = timezone(timedelta(hours=9), name="KST")
 
@@ -340,3 +340,30 @@ class OrderChance(UpbitModel):
     @property
     def ask_types(self) -> list[str]:
         return list(self.market.get("ask_types") or [])
+
+
+class Pocket(UpbitModel):
+    """``GET /v1/pockets`` — 포켓 정보 (type: main / user_spot_trading)."""
+
+    uuid: str
+    name: str
+    type: str
+
+    @property
+    def is_main(self) -> bool:
+        return self.type == "main"
+
+
+class PocketTransfer(UpbitModel):
+    """포켓 간 자산 이전 응답. state: submitted / processing / done / failed."""
+
+    model_config = ConfigDict(extra="allow", frozen=True, populate_by_name=True)
+
+    uuid: str
+    from_pocket: str | None = Field(default=None, alias="from")
+    to: str
+    state: str
+    currency: str
+    amount: Decimal
+    created_at: str
+    identifier: str | None = None

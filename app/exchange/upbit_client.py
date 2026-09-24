@@ -43,7 +43,17 @@ from app.core.exceptions import (
     make_api_error,
 )
 from app.exchange.auth import QueryParams, UpbitAuth, build_query_string, normalize_params
-from app.exchange.models import Account, Candle, CandleInterval, Market, OrderChance, OrderInfo, Ticker
+from app.exchange.models import (
+    Account,
+    Candle,
+    CandleInterval,
+    Market,
+    OrderChance,
+    OrderInfo,
+    Pocket,
+    PocketTransfer,
+    Ticker,
+)
 from app.exchange.rate_limiter import RateLimiter, rate_limit_group_for
 
 log = logging.getLogger(__name__)
@@ -347,6 +357,47 @@ class UpbitClient:
         params = {"uuid": uuid} if uuid else {"identifier": identifier}
         data = await self._request("DELETE", "/v1/order", params=params, auth=True)
         return self._parse_one(OrderInfo, data)
+
+    # ------------------------------------------------------------------
+    # 포켓 (Exchange, 인증 필요): 대시보드의 자산 이전 화면에서만 쓴다. 엔진은 호출하지 않는다.
+    # 외부 출금이 아니라 같은 계정 안의 포켓 간 이동이다.
+    # ------------------------------------------------------------------
+    async def get_pockets(self) -> list[Pocket]:
+        """포켓 정보 조회 ``GET /v1/pockets`` (메인포켓 키, [포켓관리] 권한)."""
+        data = await self._request("GET", "/v1/pockets", auth=True)
+        return self._parse_list(Pocket, data)
+
+    async def get_pocket_assets(self, pocket_uuid: str) -> list[Account]:
+        """서브포켓 잔고 조회 ``GET /v1/pockets/assets?uuid=`` (메인포켓 키, [포켓관리] 권한)."""
+        data = await self._request("GET", "/v1/pockets/assets", params={"uuid": pocket_uuid}, auth=True)
+        return self._parse_list(Account, data)
+
+    async def transfer_from_main(
+        self, *, to: str, currency: str, amount: float | str, identifier: str | None = None,
+        from_pocket: str | None = None,
+    ) -> PocketTransfer:
+        """메인포켓 자산 이전 ``POST /v1/pockets/universal_transfers`` (메인포켓 키, [포켓관리] 권한).
+        메인 ↔ 서브 양방향. ``from_pocket`` 을 비우면 키가 속한 포켓(메인)에서 보낸다."""
+        body: dict[str, Any] = {"to": to, "currency": currency, "amount": str(amount)}
+        if from_pocket:
+            body["from"] = from_pocket
+        if identifier:
+            body["identifier"] = identifier
+        data = await self._request("POST", "/v1/pockets/universal_transfers", json_body=body, auth=True)
+        return self._parse_one(PocketTransfer, data)
+
+    async def transfer_from_sub(
+        self, *, currency: str, amount: float | str, to: str | None = None, identifier: str | None = None
+    ) -> PocketTransfer:
+        """서브포켓 자산 이전 ``POST /v1/pockets/transfers`` (서브포켓 키, [자산이전] 권한).
+        ``to`` 를 비우면 메인포켓으로 보낸다."""
+        body: dict[str, Any] = {"currency": currency, "amount": str(amount)}
+        if to:
+            body["to"] = to
+        if identifier:
+            body["identifier"] = identifier
+        data = await self._request("POST", "/v1/pockets/transfers", json_body=body, auth=True)
+        return self._parse_one(PocketTransfer, data)
 
     # ------------------------------------------------------------------
     # 내부 구현

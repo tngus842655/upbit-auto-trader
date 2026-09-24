@@ -156,6 +156,14 @@ class Settings(BaseSettings):
     risk_price_deviation_limit: float | None = Field(default=0.10, gt=0, lt=1, description="시세 괴리 한도")
     risk_cooldown_seconds: float = Field(default=0.0, ge=0, description="청산 후 같은 마켓 재진입 대기(초)")
 
+    # ----- 대시보드 (Phase 8) -----
+    dashboard_host: str = "127.0.0.1"
+    dashboard_port: int = Field(default=8000, ge=1, le=65535)
+    dashboard_token: SecretStr | None = None  # 설정하면 변경·제어 API 에 X-Auth-Token 헤더 필요
+    # 포켓 자산 이전용 메인포켓 키 (권한: 포켓관리만). 없으면 대시보드에서 메인→봇 포켓 이전은 불가
+    upbit_pocket_access_key: SecretStr | None = None
+    upbit_pocket_secret_key: SecretStr | None = None
+
     # ----- 저장소 / 로그 -----
     database_url: str = "sqlite:///./data/trader.db"
     log_level: str = "INFO"
@@ -198,7 +206,10 @@ class Settings(BaseSettings):
             return None
         return value
 
-    @field_validator("upbit_access_key", "upbit_secret_key", mode="before")
+    @field_validator(
+        "upbit_access_key", "upbit_secret_key", "upbit_pocket_access_key", "upbit_pocket_secret_key", "dashboard_token",
+        mode="before",
+    )
     @classmethod
     def _blank_key_to_none(cls, value: Any) -> Any:
         if isinstance(value, str) and not value.strip():
@@ -239,6 +250,10 @@ class Settings(BaseSettings):
             and self.upbit_access_key.get_secret_value().strip()
             and self.upbit_secret_key.get_secret_value().strip()
         )
+
+    @property
+    def has_pocket_keys(self) -> bool:
+        return bool(self.upbit_pocket_access_key and self.upbit_pocket_secret_key)
 
     @property
     def is_live_trading_allowed(self) -> bool:

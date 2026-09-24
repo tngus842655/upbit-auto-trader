@@ -98,6 +98,23 @@
   주문 가능 정보 `GET /v1/orders/chance`, 체결 대기 주문 `GET /v1/orders/open`, 일괄 취소 `DELETE /v1/orders/open`.
 - 자전거래 체결 방지(SMP) 옵션, `identifier`(클라이언트 주문 ID, 중복 시 `duplicated_identifier`) 지원 → 중복 주문 방지에 활용 예정.
 
+## 포켓 API (Phase 8 대시보드에서 사용, `reference/pocket-overview` · `list-pockets` · `get-sub-pocket-balance` · `universal-transfer` · `transfer`, 2026-09 기준)
+
+- 포켓 = 한 계정 안의 하위 지갑. 메인포켓 1개 + 서브포켓(최대 5개). 서브포켓 자산은 API 로만 거래되고, Rate Limit 도 포켓 단위로 적용된다.
+- API Key 는 포켓별로 발급한다. 메인포켓 키의 [포켓관리] 권한으로 포켓 목록·서브포켓 잔고·포켓 간 이전(양방향)을 다루고, 서브포켓 키의 [자산이전] 권한으로 그 서브포켓에서 나가는 이전만 할 수 있다.
+- 이 프로젝트에서: 봇(서브포켓) 키는 `UPBIT_ACCESS_KEY`, 메인포켓 [포켓관리] 키는 `UPBIT_POCKET_ACCESS_KEY` 로 분리한다. 후자는 대시보드 포켓 탭에서만 쓰고 주문에는 쓰지 않는다. **출금 API 는 사용하지 않는다** — 포켓 이전은 같은 계정 안의 이동이다.
+
+| 기능 | 엔드포인트 | 키·권한 | 비고 |
+| --- | --- | --- | --- |
+| 포켓 정보 조회 | `GET /v1/pockets` | 메인포켓 · [포켓관리] | 메인·서브포켓의 uuid, 이름, 종류 |
+| 서브포켓 잔고 조회 | `GET /v1/pockets/assets?uuid=` | 메인포켓 · [포켓관리] | 응답은 `/v1/accounts` 와 같은 자산 목록 |
+| 포켓 잔고 조회 | `GET /v1/accounts` | 해당 포켓 키 · [자산조회] | 키가 속한 포켓의 잔고 |
+| 메인포켓 자산 이전 | `POST /v1/pockets/universal_transfers` | 메인포켓 · [포켓관리] | body `from`(생략 시 메인), `to`, `currency`, `amount`, `identifier`(선택, 멱등 키). 메인 ↔ 서브 양방향 |
+| 서브포켓 자산 이전 | `POST /v1/pockets/transfers` | 서브포켓 · [자산이전] | body `currency`, `amount`, `to`(생략 시 메인포켓), `identifier`(선택) |
+
+- 이전 응답: `uuid`, `state`, `currency`, `amount`, `from`, `to`, `created_at`. 대시보드는 `identifier` 에 `dash-<시각>-<난수>` 를 넣어 같은 요청이 두 번 접수되지 않게 한다.
+- 에러: 404 `pocket_not_found` / `currency_not_found`, 권한 없는 키로 호출하면 401 계열. 잔고 부족은 400.
+
 ## 기타
 
 - 공식 Python SDK `upbit-sdk`(Python 3.9+)가 있다(`docs/python-sdk`). 이 프로젝트는 재시도·Rate Limit·테스트용 전송 계층

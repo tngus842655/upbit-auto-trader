@@ -27,7 +27,7 @@
 | 5 | Paper Trading: 캔들 경계마다 닫힌 캔들 확정 → 전략 → 리스크 → 가상 체결(호가 기준), SQLite 기록, 재시작 복구, `run`/`status` | **완료** |
 | 6 | 리스크 관리: 거래당 최대 투자금, 자산 대비 포지션 상한, 최대 포지션 수, 일일 최대 손실, 최대 연속 손실, 손절·익절·추적 손절(실시간 감시), 시세 괴리 방어, 재진입 대기 — 백테스트·모의매매 공용 | **완료** |
 | 7 | 실제 주문 모듈: 주문 API(생성·테스트·조회·취소·주문 가능 정보), LiveBroker(시장가, identifier 멱등, 폴링·취소, 잔고 동기화), 3중 안전장치, 엔진 하트비트·명령 큐(pause/resume/stop/halt), `order-test`/`control` 명령 — 기본 비활성 | **완료** |
-| 8 | 대시보드 (FastAPI) | 예정 |
+| 8 | 대시보드 (FastAPI + Vue, 빌드 없음): 자산·성과·신호·주문·로그 조회, 실행 설정(전략·파라미터·리스크·마켓·캔들) 버전 저장 → 다음 캔들부터 반영, Start/Pause/Resume/Stop/긴급 정지/강제 종료, 포켓 잔고·KRW 이전, WebSocket 실시간 갱신, 토큰 인증 — 엔진과 별도 프로세스 | **완료** |
 | 9 | 알림 (Telegram/Discord) | 예정 |
 | 10 | Docker / 서버 배포 | 예정 |
 
@@ -90,6 +90,9 @@ copy .env.example .env      # Windows
 | `RISK_PRICE_DEVIATION_LIMIT` | `0.10` | 신호 캔들 종가와 현재 시세의 괴리가 이보다 크면 진입 안 함 |
 | `RISK_COOLDOWN_SECONDS` | `0` | 청산 후 같은 마켓 재진입 대기(초) |
 | `LOG_LEVEL` / `LOG_DIR` | `INFO` / `logs` | 로그 레벨, 로그 폴더 (`logs/trader.log`, 10MB×5 회전) |
+| `DASHBOARD_HOST` / `DASHBOARD_PORT` | `127.0.0.1` / `8000` | 대시보드(`serve`) 바인드 주소·포트. 외부 바인드는 토큰 필수 |
+| `DASHBOARD_TOKEN` | 없음 | 설정하면 대시보드의 변경·제어 API 에 `X-Auth-Token` 필요. 없으면 로컬 호스트만 허용 |
+| `UPBIT_POCKET_ACCESS_KEY` / `UPBIT_POCKET_SECRET_KEY` | 없음 | 메인포켓에서 발급한 "포켓관리" 권한 키. 대시보드의 포켓 목록·메인→봇 KRW 이전에만 사용(주문에는 쓰지 않음) |
 | `UPBIT_API_URL` | `https://api.upbit.com` | REST 엔드포인트 |
 | `HTTP_TIMEOUT_SECONDS` / `HTTP_MAX_RETRIES` | `10` / `3` | HTTP 타임아웃(초), GET 재시도 횟수 |
 
@@ -118,11 +121,29 @@ copy .env.example .env      # Windows
 .venv\Scripts\python.exe -m app.main control pause                             # 실행 중 엔진 제어: pause / resume / stop / halt / resume-risk
 .venv\Scripts\python.exe -m app.main order-test KRW-BTC --amount 5000          # 주문 테스트 API 로 키·권한 검증 (실제 주문 없음)
 .venv\Scripts\python.exe -m app.main run --confirm-live REAL-MONEY             # LIVE (TRADING_MODE=LIVE + LIVE_TRADING_ENABLED=true 필요)
+.venv\Scripts\python.exe -m app.main serve                                   # 대시보드 http://127.0.0.1:8000 (엔진과 별도 프로세스)
 ```
 
-`run` 은 `TRADING_MODE=PAPER` 에서만 동작한다. 시작 시 DB 에 계좌가 있으면 현금·포지션·처리 이력을 복구해 이어서 돌고,
+`run` 은 기본(PAPER)에서 모의매매를 하고, LIVE 는 `.env` 이중 플래그와 `--confirm-live REAL-MONEY` 가 모두 있어야 한다. 시작 시 DB 에 계좌가 있으면 현금·포지션·처리 이력을 복구해 이어서 돌고,
 캔들 경계(예: 매시 정각 + 3초)마다 REST 로 닫힌 캔들을 확정해 전략을 돌린다. 가상 체결은 WebSocket 호가의
 최우선 매도/매수가에 슬리피지·수수료를 더해 즉시 이뤄지며, 모든 신호·주문·체결·포지션·자산 스냅샷·이벤트가 SQLite 에 남는다.
+
+### 대시보드 (Phase 8)
+
+```bash
+.venv\Scripts\python.exe -m app.main serve                              # http://127.0.0.1:8000
+.venv\Scripts\python.exe -m app.main serve --host 0.0.0.0 --port 8000   # 외부 접속: DASHBOARD_TOKEN 필수
+.venv\Scripts\python.exe scripts\serve_dashboard.py                    # 어느 폴더에서 실행해도 됨 (미리보기·서비스 등록용)
+```
+
+- 대시보드는 **엔진과 별도 프로세스**다. 매매 판단과 주문은 엔진만 하고, 웹 서버는 DB(`engine_status`·`bot_commands`·`bot_settings`)를 읽고 쓸 뿐이다. 브라우저나 웹 서버를 꺼도 엔진은 계속 돈다.
+- 탭: **대시보드**(총 자산·현금·오늘/누적 수익률·MDD·거래 횟수/승률, 자산 곡선, 봇 상태·리스크 상태, 보유 포지션, 현재 전략 신호, 최근 신호/거래/주문/오류) · **설정** · **제어** · **포켓 · 자산 이전** · **로그**. 실시간 갱신은 WebSocket `/ws`(2초), 끊기면 15초 폴링으로 대체한다. 상단에서 PAPER/LIVE 기록을 골라 본다.
+- **설정 탭**: 마켓·캔들 단위·전략·파라미터·리스크 수치를 폼(전략 스키마에서 자동 생성)으로 저장하면 `bot_settings` 에 **새 버전**이 쌓인다. 엔진은 캔들 경계마다 버전을 확인해 전략·파라미터·리스크는 **다음 캔들부터** 반영하고(즉시 무조건 적용하지 않는다), 마켓·캔들 단위는 "재시작 필요" 로 표시한다. `.env` 의 값은 DB 에 버전이 없을 때의 초기값이며, CLI `run` 의 마켓·전략 인자는 그 실행에서만 DB 값을 덮어쓴다.
+- **제어 탭**: Start 는 `python -m app.main run` 을 분리된 프로세스로 띄운다(로그 `logs/engine-{mode}.log`). Pause(신규 매수만 중단, 청산·손절은 계속)/Resume/Stop/긴급 정지(halt)/긴급 정지 해제/설정 다시 읽기는 `bot_commands` 큐로 전달되고 엔진이 2초 안에 처리한다. 강제 종료는 응답 없는 프로세스를 PID 로 내리는 마지막 수단이다. 엔진이 꺼져 있는 동안 큐에 쌓인 명령은 다음 시작 때 무시된다.
+- **LIVE 시작**: 상단 모드를 LIVE 로 바꾸고, `.env` 이중 플래그 + 확인 문구 `REAL-MONEY` 입력 + 브라우저 확인창까지 통과해야 한다. CLI 와 같은 3중 잠금이 그대로 적용되며 웹에서 우회할 수 없다.
+- **포켓 탭**: 봇 API Key 포켓의 잔고 조회, 봇 포켓 → 메인포켓 KRW 이전(봇 키에 "자산이전" 권한). 메인 → 봇 포켓 이전과 포켓 목록은 **메인포켓에서 발급한 "포켓관리" 권한 키**(`UPBIT_POCKET_ACCESS_KEY` / `UPBIT_POCKET_SECRET_KEY`)가 있을 때만 된다. 같은 계정 안의 이동일 뿐이며 외부 출금 API 는 없다.
+- **보안**: 기본 `127.0.0.1` 바인드. `DASHBOARD_TOKEN` 을 설정하면 변경·제어 API 에 `X-Auth-Token`(화면 상단 토큰 칸)이 필요하고, 설정하지 않으면 로컬 호스트에서만 변경을 허용한다. 외부 바인드는 토큰 없이는 거부된다. API Key 값은 화면·API 어디에도 나오지 않는다(설정 여부만 표시).
+- API: `GET /api/status|balance|positions|performance|recent|orders|trades|signals|logs|strategy|settings|pockets`, `PUT /api/settings`, `POST /api/bot/start|pause|resume|stop|halt|resume-risk|reload|kill`, `POST /api/pockets/transfer`, `WS /ws` — 모두 `?mode=paper|live` 로 기록을 고른다.
 
 `backtest` 는 API 로 받은 캔들을 `data/cache/` 에 저장해 다음 실행에서 재사용하고, 결과를 `data/backtests/<시각>_<마켓>_<단위>_<전략>/` 에 `summary.json`, `trades.csv`, `equity.csv`, `signals.csv` 로 남긴다(`--no-save` 로 생략). 출력 예:
 
@@ -196,7 +217,7 @@ WebSocket 요청 형식·재연결·치명적 오류 중단, 지표 손계산 �
 ```
 upbit-auto-trader/
 ├── app/
-│   ├── main.py                 # CLI 진입점 (check / ticker / candles / balance / stream / signal)
+│   ├── main.py                 # CLI 진입점 (check / ticker / candles / balance / stream / signal / backtest / run / status / control / order-test / serve)
 │   ├── config/settings.py      # pydantic-settings, TradingMode, LIVE 이중 안전장치
 │   ├── core/
 │   │   ├── exceptions.py       # TraderError → UpbitError → API/네트워크/응답 예외 계층
@@ -220,23 +241,29 @@ upbit-auto-trader/
 │   │   ├── market_state.py     # 마켓별 닫힌 캔들 롤링 저장 + 현재가·호가 상태
 │   │   ├── engine.py           # TradingEngine: 캔들 경계 확정 → 전략 → 리스크 → 브로커 → DB, 재시작 복구, 하트비트·명령 큐
 │   │   ├── live_broker.py      # LiveBroker: 실제 시장가 주문 (주문 가능 정보 확인, identifier, 폴링·취소, 거래소 잔고 동기화)
-│   │   └── live_guard.py       # 실제 주문 관문 (Phase 7 에서 사용)
+│   │   ├── live_guard.py       # 실제 주문 관문 (LIVE 확인 문구)
+│   │   └── runtime_settings.py # 실행 설정 모델(마켓·전략·파라미터·캔들·리스크): 검증, 버전 비교(즉시 반영/재시작 필요 구분)
 │   ├── risk/
 │   │   ├── config.py           # RiskConfig: 모든 리스크 수치 (나중에 DB·웹 입력으로 교체 가능)
 │   │   ├── manager.py          # RiskManager: 진입 심사 evaluate / 청산 감시 check_exits / 결과 반영 record_trade
 │   │   └── base.py             # RiskPolicy 인터페이스 + BasicRiskManager(최소판)
 │   ├── database/
 │   │   ├── models.py           # strategy_signals / orders / trades / round_trips / positions / accounts / balances / bot_logs / market_data
-│   │   │                       #   + engine_status(하트비트) / bot_commands(명령 큐) — 대시보드(Phase 8) 이음새
-│   │   ├── database.py         # SQLAlchemy 엔진·세션 (SQLite WAL)
+│   │   │                       #   + engine_status(하트비트) / bot_commands(명령 큐) / bot_settings(실행 설정 버전) — 대시보드 이음새
+│   │   ├── database.py         # SQLAlchemy 엔진·세션 (SQLite WAL), 빠진 컬럼 자동 보강(구버전 DB 호환)
 │   │   └── repository.py       # 저장·조회·재시작 복구
 │   ├── backtest/
 │   │   ├── engine.py           # BacktestConfig / BacktestEngine: 다음 캔들 시가 체결, 슬리피지, 손절·익절, B&H 벤치마크
 │   │   ├── metrics.py          # 총수익률·CAGR·MDD·변동성·Sharpe·Sortino·승률·PF·기대값·연속 손실·노출
 │   │   ├── report.py           # 콘솔 보고서, summary.json / trades.csv / equity.csv / signals.csv 저장
 │   │   └── loader.py           # CSV 또는 API(+data/cache) 에서 닫힌 캔들 로드
-│   └── api/                    # Phase 8 자리
+│   ├── api/
+│   │   ├── server.py           # FastAPI: 조회·설정·제어·포켓 API, WebSocket /ws, 정적 파일, 토큰/로컬 인증
+│   │   ├── services.py         # 대시보드 조회 서비스(자산·성과·MDD·자산 곡선, 시세 캐시), 포켓 조회·이전
+│   │   └── process.py          # 엔진 프로세스 분리 실행·생존 판정(하트비트 45초)·강제 종료
+│   └── web/static/             # 대시보드 프론트: Vue 3 + Chart.js (빌드 없음) — index.html / app.js / style.css / vendor/
 ├── scripts/fetch_candles.py    # 과거 캔들 CSV 수집
+├── scripts/serve_dashboard.py  # 어느 폴더에서든 대시보드 실행 (프로젝트 루트로 이동 후 serve)
 ├── tests/                      # pytest (네트워크 불필요)
 ├── docs/upbit-api-notes.md     # 공식 문서에서 확정한 API 사양 요약 (URL·갱신일 포함)
 ├── data/  logs/                # 런타임 산출물 (git 제외)
@@ -312,7 +339,12 @@ WebSocket(Phase 2) 흐름:
 5. 시작 시와 스냅샷 주기마다 `GET /v1/accounts` 로 내부 계좌를 거래소 기준으로 동기화한다. 실거래 기록은 같은 DB 에 `mode=live` 로 구분해 남는다.
 6. 출금 API 는 어떤 경우에도 구현하지 않는다(테스트로 보장).
 
-대시보드 이음새(Phase 8 대비): 엔진은 `engine_status` 테이블에 10초마다 하트비트(상태 RUNNING/PAUSED/STOPPED, WebSocket 상태, 마지막 시세·캔들·거래 시각, 평가액, 리스크 상태)를 쓰고, `bot_commands` 큐를 2초마다 읽어 pause(신규 매수 중단)/resume/stop/halt(긴급 정지)/resume_risk 를 처리한다. 웹 서버는 이 두 테이블만 읽고 쓰면 되므로 엔진과 완전히 분리된 프로세스로 둘 수 있다. 설정 변경은 Phase 8 에서 `bot_settings` 테이블에 저장해 다음 캔들부터 반영하는 방식으로 붙인다.
+대시보드(Phase 8) 구조 — `브라우저 ↔ FastAPI(app/api) ↔ SQLite ↔ TradingEngine(별도 프로세스) ↔ Upbit`:
+
+1. 엔진은 `engine_status` 에 10초마다 하트비트(상태 RUNNING/PAUSED/STOPPED, WebSocket 상태, 마지막 시세·캔들·거래 시각, 평가액, 리스크 상태, PID, 적용 중인 설정 버전, 재시작 필요 여부)를 쓰고, `bot_commands` 큐를 2초마다 읽어 pause/resume/stop/halt/resume_risk/reload 를 처리한다. 하트비트가 45초 이상 끊기면 대시보드는 엔진을 죽은 것으로 본다.
+2. 웹 서버는 매매 판단을 하지 않는다. 조회는 DB 와 공개 시세(현재가 2초 캐시)만 쓰고, 제어는 큐에 넣고, 설정은 `bot_settings` 에 새 버전으로 저장한다. Start 만 예외로 `python -m app.main run` 프로세스를 띄우며, 그 뒤로는 관여하지 않는다.
+3. 실행 설정(`RuntimeSettings`)은 `.env` 에서 초기값을 만들고 이후 DB 버전이 우선한다. 엔진은 캔들 경계에서 DB 버전이 올라갔으면 전략·파라미터·리스크를 교체(전략이 바뀌면 워밍업 캔들도 다시 받음)하고, 마켓·캔들 단위 변경은 `restart_required` 로만 표시한다. 잘못된 버전(검증 실패)은 건너뛰고 로그를 남긴다.
+4. LIVE 시작은 CLI 와 같은 3중 잠금(.env 이중 플래그 → 확인 문구 → `allow_orders`)을 그대로 거친다. 대시보드가 켜지지 않아도 엔진은 CLI 만으로 완전히 동작한다.
 
 자세한 API 사양(엔드포인트, 파라미터, 에러 코드, Rate Limit 표)은 [docs/upbit-api-notes.md](docs/upbit-api-notes.md).
 
@@ -321,3 +353,5 @@ WebSocket(Phase 2) 흐름:
 - 어떤 전략도 수익을 보장하지 않는다. 백테스트 결과는 미래 수익이 아니다.
 - LIVE 전환은 백테스트 → Paper Trading 검증 → 소액 순서로만 진행한다.
 - `.env` 를 잃어버리거나 노출했다면 즉시 업비트에서 해당 API Key 를 폐기한다.
+- 대시보드를 외부 네트워크에 열 때는 반드시 `DASHBOARD_TOKEN` 을 설정하고 HTTPS(리버스 프록시) 뒤에 둔다. 토큰은 `.env` 에만 둔다.
+- 포켓 이전은 같은 업비트 계정 안에서만 움직인다. 출금 API 는 어떤 화면·명령에도 없다.

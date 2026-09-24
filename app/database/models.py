@@ -213,6 +213,8 @@ class EngineStatus(Base):
     message: Mapped[str] = mapped_column(Text, default="")
     risk: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    settings_version: Mapped[int] = mapped_column(Integer, default=0)
+    restart_required: Mapped[bool] = mapped_column(default=False)
 
 
 class BotCommand(Base):
@@ -227,3 +229,18 @@ class BotCommand(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, index=True)
     processed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     result: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class BotSettingsRecord(Base):
+    """실행 설정(RuntimeSettings) 버전 기록. 최신 버전이 현재 설정이며, 엔진은 캔들 경계마다 버전을 확인한다."""
+
+    __tablename__ = "bot_settings"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mode: Mapped[str] = mapped_column(String(10), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON)
+    note: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, index=True)
+
+    __table_args__ = (UniqueConstraint("mode", "version", name="uq_bot_settings_version"),)

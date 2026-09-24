@@ -19,6 +19,9 @@ from app.core.exceptions import LiveTradingDisabledError
 
 log = logging.getLogger(__name__)
 
+#: LIVE 실행 시 CLI/대시보드에서 입력해야 하는 확인 문구
+LIVE_CONFIRM_PHRASE = "REAL-MONEY"
+
 
 def is_live_order_allowed(settings: Settings) -> bool:
     return settings.trading_mode is TradingMode.LIVE and settings.live_trading_enabled is True

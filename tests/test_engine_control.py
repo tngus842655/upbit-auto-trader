@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -87,11 +88,19 @@ async def test_run_loop_processes_commands_and_heartbeats(make_settings) -> None
         )
         for i in range(1, 12)
     ]
-    h.repo.enqueue_command("stop")  # 루프가 첫 폴링에서 정지
+    h.repo.enqueue_command("pause")  # 시작 전에 쌓인 명령은 무시된다 (죽은 엔진에 보낸 명령이 새 실행을 건드리지 않게)
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.3)
+        h.repo.enqueue_command("stop")  # 실행 중 들어온 명령은 처리 → 루프 정지
+
+    stopper = asyncio.create_task(stop_soon())
     stats = await h.engine.run(duration_seconds=5)
-    assert stats.commands_processed == 1 and h.engine.status == "stopped"
+    await stopper
+    assert stats.commands_processed == 1 and h.engine.status == "stopped" and h.engine.paused is False
     assert h.repo.read_engine_status().status == "STOPPED"
     assert h.repo.pending_commands() == []
+    assert any(e.event == "stale_commands" for e in h.repo.recent_logs(20))
 
 
 def test_live_mode_requires_flags_keys_and_live_broker(make_settings) -> None:
