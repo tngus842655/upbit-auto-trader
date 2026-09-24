@@ -191,5 +191,5 @@ def test_pockets_endpoints(api, monkeypatch) -> None:
 def test_index_and_static(api) -> None:
     client, _, _, _ = api
     r = client.get("/")
-    assert r.status_code == 200 and "Upbit Auto Trader" in r.text
+    assert r.status_code == 200 and "업비트 자동매매" in r.text
     assert client.get("/static/app.js").status_code == 200

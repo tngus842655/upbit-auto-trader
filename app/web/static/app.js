@@ -53,8 +53,9 @@
       engineState() { return this.status.engine_state || "NONE"; },
       engineLabel() {
         const s = this.engineState;
-        return { RUNNING: "RUNNING", PAUSED: "PAUSED", STOPPED: "STOPPED", STARTING: "STARTING", STALE: "응답 없음", NONE: "미실행" }[s] || s;
+        return { RUNNING: "실행 중", PAUSED: "일시정지", STOPPED: "정지됨", STARTING: "시작 중", STALE: "응답 없음", NONE: "미실행" }[s] || s;
       },
+      modeLabel() { return this.mode === "live" ? "실거래" : "모의매매"; },
       paramFields() { return this.form ? schemaFields(this.meta.schemas[this.form.strategy_name]) : []; },
       riskFields() { return schemaFields(this.meta.risk_schema); },
     },
@@ -67,6 +68,26 @@
       fmtTime(iso) { if (!iso) return "-"; const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString("ko-KR", { hour12: false }); },
       riskLabel(name) { return RISK_LABELS[name] || name; },
       notify(text, kind) { this.toast = { text, kind: kind || "info" }; setTimeout(() => { if (this.toast && this.toast.text === text) this.toast = null; }, 5000); },
+      // ---------- 한글 표기 (엔진·API 는 영문 코드를 쓰고 화면에서만 바꾼다)
+      wsLabel(v) { return { CONNECTED: "연결됨", CONNECTING: "연결 중", RECONNECTING: "재연결 중", DISCONNECTED: "끊김", CLOSED: "종료", NOT_USED: "미사용", ERROR: "오류" }[v] || v || "-"; },
+      actionLabel(v) { return { BUY: "매수", SELL: "매도", HOLD: "관망" }[v] || v; },
+      sideLabel(v) { return { BUY: "매수", SELL: "매도", bid: "매수", ask: "매도" }[v] || v; },
+      orderStatusLabel(v) { return { FILLED: "체결", PARTIAL: "부분 체결", PARTIALLY_FILLED: "부분 체결", REJECTED: "거부", CANCELLED: "취소", CANCELED: "취소", PENDING: "대기", SUBMITTED: "접수", FAILED: "실패" }[v] || v; },
+      reasonLabel(v) { return { stop_loss: "손절", take_profit: "익절", trailing_stop: "추적 손절", signal: "신호" }[v] || v; },
+      levelLabel(v) { return { INFO: "정보", WARNING: "경고", ERROR: "오류", DEBUG: "디버그" }[v] || v; },
+      envModeLabel(v) { return { PAPER: "모의매매", LIVE: "실거래", BACKTEST: "백테스트" }[v] || v || "-"; },
+      fieldLabels(list) { const m = { markets: "거래 마켓", strategy_name: "전략", strategy_params: "전략 파라미터", candle_interval: "캔들 단위", risk: "리스크" }; return (list || []).map((f) => m[f] || f).join(", ") || "없음"; },
+      channelLabel(v) { return { telegram: "텔레그램", discord: "디스코드", log: "로그" }[v] || v; },
+      channelLabels(list) { return (list || []).map((c) => this.channelLabel(c)).join(", ") || "없음"; },
+      eventLabel(v) {
+        const m = { bot_start: "봇 시작", bot_stop: "봇 종료", command: "명령", stale_commands: "대기 명령 무시", dashboard_start: "대시보드 시작 요청",
+          dashboard_kill: "강제 종료", pocket_transfer: "포켓 이전", notify_test: "알림 테스트", notify_failed: "알림 실패", order_filled: "체결",
+          order_rejected: "주문 거부", duplicate_order_blocked: "중복 주문 차단", risk_rejected: "리스크 거부", risk_lock: "리스크 잠금",
+          paused_skip: "일시정지 중 건너뜀", candle_fetch_failed: "캔들 조회 실패", price_stream_failed: "시세 스트림 끊김", api_error: "API 오류",
+          settings_applied: "설정 반영", settings_invalid: "설정 검증 실패", reconcile: "잔고 동기화", signal: "신호", exit: "청산" };
+        return m[v] || v;
+      },
+      commandLabel(v) { return { pause: "일시정지", resume: "재개", stop: "정지", halt: "긴급 정지", resume_risk: "긴급 정지 해제", reload: "설정 다시 읽기", kill: "강제 종료" }[v] || v; },
       saveToken() { localStorage.setItem("token", this.token); this.connectWs(); },
       switchMode() { localStorage.setItem("mode", this.mode); this.loadAll(); this.connectWs(); },
       async api(path, opts) {
@@ -138,22 +159,22 @@
       },
       // ---------- 제어
       async cmd(command, payload) {
-        try { const r = await this.api(`/api/bot/${command}`, { method: "POST", body: payload || {} }); this.notify(`명령 '${command}' 전송 (#${r.id})`, "ok"); }
+        try { const r = await this.api(`/api/bot/${command}`, { method: "POST", body: payload || {} }); this.notify(`'${this.commandLabel(command)}' 명령 전송 (#${r.id})`, "ok"); }
         catch (e) { this.notify("명령 실패: " + e.message, "bad"); }
       },
       async startEngine() {
         if (this.mode === "live" && !confirm("실제 자금으로 거래를 시작합니다. 계속할까요?")) return;
-        try { const r = await this.api("/api/bot/start", { method: "POST", body: { confirm_live: this.confirmLive } }); this.notify(`엔진 시작 (pid ${r.pid})`, "ok"); setTimeout(() => this.loadAll(), 3000); }
+        try { const r = await this.api("/api/bot/start", { method: "POST", body: { confirm_live: this.confirmLive } }); this.notify(`엔진 시작 (프로세스 ID ${r.pid})`, "ok"); setTimeout(() => this.loadAll(), 3000); }
         catch (e) { this.notify("시작 실패: " + e.message, "bad"); }
       },
       async halt() { const reason = prompt("긴급 정지 사유", "수동 정지"); if (reason != null) await this.cmd("halt", { reason }); },
-      async kill() { if (confirm("엔진 프로세스를 강제 종료합니다. 먼저 Stop 을 시도했나요?")) await this.cmd("kill"); },
+      async kill() { if (confirm("엔진 프로세스를 강제 종료합니다. 먼저 정지를 시도했나요?")) await this.cmd("kill"); },
       async notifyTest() {
         try {
           const r = await this.api("/api/notify/test", { method: "POST", body: {} });
           const bad = Object.entries(r.results).filter(([, err]) => err);
-          if (bad.length) this.notify("알림 일부 실패: " + bad.map(([ch, err]) => ch + " — " + err).join("; "), "bad");
-          else this.notify("알림 발송 성공: " + Object.keys(r.results).join(", "), "ok");
+          if (bad.length) this.notify("알림 일부 실패: " + bad.map(([ch, err]) => this.channelLabel(ch) + " — " + err).join("; "), "bad");
+          else this.notify("알림 발송 성공: " + this.channelLabels(Object.keys(r.results)), "ok");
         } catch (e) { this.notify("알림 테스트 실패: " + e.message, "bad"); }
       },
       // ---------- 포켓
