@@ -3,18 +3,22 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from app.core.exceptions import ConfigError
 from app.database import Database, Repository
+from app.exchange.ws_models import parse_ws_message
 from app.risk import RiskManager
 from app.trading.engine import TradingEngine
 from app.trading.live_broker import LiveBroker
 from app.trading.orders import PaperBroker
 from app.trading.portfolio import Portfolio
 from tests.test_engine import MARKET, T0, FakeClient, Harness, TimedStrategy
+from tests.test_websocket import ORDERBOOK_JSON
 
 
 async def test_pause_blocks_new_entries_but_allows_exits(make_settings) -> None:
@@ -242,6 +246,115 @@ async def test_exit_retry_backoff_prevents_storm(make_settings) -> None:
     h.feed_prices(ask=103.0, bid=102.0)
     await h.engine.check_exits(h.now, force=True)
     assert RejectingBroker.calls == 2 and h.engine._exit_failures[MARKET] == 2  # 다음 백오프 10초
+
+
+class ScriptedWS:
+    """감사 HIGH-2 용 가짜 WebSocket: 메시지 목록을 내보낸 뒤 끝나거나(None) 예외를 낸다."""
+
+    def __init__(self, harness: Harness, books: list[tuple[float, float]], *, error: Exception | None = None) -> None:
+        self.h = harness
+        self.books = books
+        self.error = error
+        self.state = type("S", (), {"value": "CONNECTED"})()
+        self.closed = False
+
+    async def stream(self):
+        for ask, bid in self.books:
+            book = {**ORDERBOOK_JSON, "code": MARKET, "timestamp": int(self.h.now.timestamp() * 1000),
+                    "orderbook_units": [{"ask_price": ask, "bid_price": bid, "ask_size": 1, "bid_size": 1}]}
+            self.h.now += timedelta(seconds=2)
+            yield parse_ws_message(json.dumps(book))
+        if self.error is not None:
+            raise self.error
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class FlakyRepo:
+    """save_order 만 SQLite 잠금 오류를 내는 저장소 (감사 HIGH-2 재현 스크립트와 같은 조건)."""
+
+    def __init__(self, real) -> None:
+        self.real = real
+        self.failures = 0
+
+    def __getattr__(self, name):
+        if name == "save_order":
+            def boom(*_a, **_k):
+                self.failures += 1
+                raise OperationalError("INSERT INTO orders", {}, Exception("database is locked"))
+            return boom
+        return getattr(self.real, name)
+
+
+def stopping_sleep(h: Harness, sleeps: list[float], stop_after: int):
+    """백오프 sleep 을 기록하고 n번째에 엔진을 정지시켜 루프를 끝낸다."""
+
+    async def _sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) >= stop_after:
+            h.engine._stop.set()
+
+    return _sleep
+
+
+async def test_price_loop_survives_exit_check_exception(make_settings) -> None:
+    """감사 HIGH-2: check_exits 안의 DB 잠금 예외가 시세 루프를 끝내지 않는다."""
+    h = Harness(make_settings)
+    await h.engine.warmup()
+    h.now = T0 + timedelta(hours=11, seconds=5)
+    h.portfolio.buy(MARKET, 100.0, time=h.now, amount=100_000)  # 손절선 95
+    real_repo = h.engine.repo
+    h.engine.repo = FlakyRepo(real_repo)
+    ws = ScriptedWS(h, [(97.0, 96.0), (93.0, 92.0), (91.0, 90.0)])
+    h.engine.ws_factory = lambda subs: ws
+    sleeps: list[float] = []
+    h.engine.sleep = stopping_sleep(h, sleeps, 1)
+    await asyncio.wait_for(h.engine._price_loop(), timeout=3)
+    assert h.engine.stats.price_updates == 3  # 예외 뒤에도 남은 메시지를 계속 처리했다
+    assert h.engine.repo.failures >= 1 and h.engine.stats.errors >= 1
+    events = [e.event for e in real_repo.recent_logs(10)]
+    assert "exit_check_failed" in events and "price_stream_failed" not in events
+    assert sleeps == [1.0] and ws.closed  # 스트림이 끝나면 백오프 후 재연결하려 했다
+
+
+async def test_price_loop_reconnects_after_stream_error(make_settings) -> None:
+    """스트림 예외 → price_stream_failed 기록 후 백오프 재연결, 다시 수신되면 백오프 초기화."""
+    h = Harness(make_settings)
+    await h.engine.warmup()
+    h.now = T0 + timedelta(hours=11, seconds=5)
+    streams = [ScriptedWS(h, [(101.0, 100.0)], error=RuntimeError("ws down")), ScriptedWS(h, [(102.0, 101.0)])]
+    created: list[ScriptedWS] = []
+
+    def factory(subs):
+        ws = streams.pop(0)
+        created.append(ws)
+        return ws
+
+    h.engine.ws_factory = factory
+    sleeps: list[float] = []
+    h.engine.sleep = stopping_sleep(h, sleeps, 2)
+    await asyncio.wait_for(h.engine._price_loop(), timeout=3)
+    assert len(created) == 2 and h.engine.stats.price_stream_restarts == 1
+    assert h.engine.stats.price_updates == 2 and all(ws.closed for ws in created)
+    assert sleeps == [1.0, 1.0]  # 오류 뒤 1초, 정상 수신 후 스트림 종료 → 백오프 초기화된 1초
+    assert any(e.event == "price_stream_failed" for e in h.repo.recent_logs(10))
+
+
+async def test_price_staleness_alert_once_until_recovered(make_settings) -> None:
+    h = Harness(make_settings)
+    await h.engine.warmup()
+    h.now = T0 + timedelta(hours=11, seconds=5)
+    assert h.engine._check_price_staleness(h.now) is False  # 포지션 없음 → 알림 없음
+    h.feed_prices(ask=101.0, bid=100.0)
+    h.portfolio.buy(MARKET, 100.0, time=h.now, amount=100_000)
+    assert h.engine._check_price_staleness(h.now + timedelta(seconds=30)) is False
+    assert h.engine._check_price_staleness(h.now + timedelta(seconds=200)) is True
+    assert h.engine._check_price_staleness(h.now + timedelta(seconds=260)) is True  # 반복 알림은 없음
+    assert sum(1 for e in h.repo.recent_logs(10) if e.event == "price_stale") == 1
+    h.now += timedelta(seconds=300)
+    h.feed_prices(ask=101.0, bid=100.0)  # 시세 복구 → 리셋
+    assert h.engine._check_price_staleness(h.now) is False and h.engine._price_stale_alerted is False
 
 
 def test_live_mode_requires_flags_keys_and_live_broker(make_settings) -> None:

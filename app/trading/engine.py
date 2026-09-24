@@ -80,6 +80,7 @@ class EngineStats:
     orders_rejected: int = 0
     orders_unknown: int = 0  # 거래소 생성 여부 미확인 (운영자 확인 필요)
     orders_resolved: int = 0  # 미확정 주문을 후속 조회로 확정한 수
+    price_stream_restarts: int = 0  # 시세 스트림 재연결 횟수
     risk_rejections: int = 0
     exits_triggered: int = 0
     risk_locks: int = 0
@@ -167,6 +168,11 @@ class TradingEngine:
         self._exit_failures: dict[str, int] = {}
         self.exit_retry_base = 5.0
         self.exit_retry_max = 300.0
+        # 시세 루프: 스트림이 끊기거나 예외가 나도 백오프 후 다시 붙는다 (감사 HIGH-2)
+        self.price_loop_backoff = 1.0
+        self.price_loop_max_backoff = 60.0
+        self.price_stale_alert_seconds = 120.0  # 포지션이 있는데 이만큼 시세가 없으면 알림
+        self._price_stale_alerted = False
         self.heartbeat_interval = 10.0
         self._last_command_poll: datetime | None = None
         self._reload_requested = False
@@ -669,24 +675,90 @@ class TradingEngine:
     # ------------------------------------------------------------------
     # 실행 루프
     # ------------------------------------------------------------------
+    def _log_safely(self, level: str, event: str, message: str, data: dict[str, Any] | None = None) -> None:
+        """DB 기록 실패(잠금 등)가 호출자를 죽이지 않게 한다."""
+        try:
+            self.repo.log(level, event, message, data)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("로그 기록 실패(%s %s): %s", level, event, exc)
+
+    async def _handle_price_message(self, message: Any) -> None:
+        """시세 메시지 하나를 반영하고 청산 감시를 돌린다. 예외는 여기서 격리한다 (DB 잠금 등으로 루프가 죽지 않게)."""
+        if not self.state.update_price(message):
+            return
+        self.stats.price_updates += 1
+        if not self.portfolio.positions:
+            return
+        try:
+            await self.check_exits(self.clock())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 한 메시지 처리 실패가 시세 감시를 멈추지 않게
+            self.stats.errors += 1
+            log.exception("청산 감시 처리 실패 (다음 시세에서 다시 시도)")
+            self._log_safely("ERROR", "exit_check_failed", f"{type(exc).__name__}: {exc}")
+            self._notify(EventKind.API_ERROR, "청산 감시 처리 실패", f"{type(exc).__name__}: {exc}", key="exit_check")
+
     async def _price_loop(self) -> None:
+        """WebSocket 시세 루프 — 스트림이 끝나거나 예외가 나도 백오프 후 다시 붙고, 정지 명령에만 끝난다.
+
+        (감사 HIGH-2)
+        """
         if self.ws_factory is None:
             return
         subs = [Subscription.ticker(self.markets), Subscription.orderbook(self.markets, units=1)]
-        self._ws = self.ws_factory(subs)
-        try:
-            async for message in self._ws.stream():
-                if self.state.update_price(message):
-                    self.stats.price_updates += 1
-                    if self.portfolio.positions:
-                        await self.check_exits(self.clock())
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:  # noqa: BLE001 - 시세 스트림 장애는 엔진을 죽이지 않는다 (REST 보정으로 대체)
-            self.stats.errors += 1
-            log.error("시세 스트림 종료: %s (REST 현재가로 대체)", exc)
-            self.repo.log("ERROR", "price_stream_failed", str(exc))
-            self._notify(EventKind.API_ERROR, "시세 스트림 끊김", f"{exc} (REST 현재가로 대체)", key="price_stream")
+        backoff = self.price_loop_backoff
+        first = True
+        while not self._stop.is_set():
+            if not first:
+                self.stats.price_stream_restarts += 1
+                log.info("시세 스트림 재연결 (%d회)", self.stats.price_stream_restarts)
+            first = False
+            self._ws = self.ws_factory(subs)
+            try:
+                async for message in self._ws.stream():
+                    backoff = self.price_loop_backoff  # 정상 수신 → 백오프 초기화
+                    await self._handle_price_message(message)
+                log.warning("시세 스트림이 끝남 → %.0f초 뒤 재연결", backoff)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001 - 시세 스트림 장애는 엔진을 죽이지 않는다 (재연결, 그동안 REST 보정)
+                self.stats.errors += 1
+                log.error("시세 스트림 종료: %s (%.0f초 뒤 재연결, 그동안 REST 현재가로 대체)", exc, backoff)
+                self._log_safely("ERROR", "price_stream_failed", str(exc))
+                self._notify(EventKind.API_ERROR, "시세 스트림 끊김", f"{exc} ({backoff:.0f}초 뒤 재연결)",
+                             key="price_stream")
+            finally:
+                if self._ws is not None:
+                    with contextlib.suppress(Exception):
+                        await self._ws.close()
+            if self._stop.is_set():
+                break
+            await self.sleep(backoff)
+            backoff = min(backoff * 2, self.price_loop_max_backoff)
+
+    def _check_price_staleness(self, now: datetime) -> bool:
+        """포지션이 있는데 시세가 price_stale_alert_seconds 넘게 끊겼으면 한 번 알리고 True.
+
+        시세가 복구되면 다시 알릴 수 있게 리셋한다.
+        """
+        if not self.portfolio.positions:
+            self._price_stale_alerted = False
+            return False
+        last = self.last_data_at()
+        age = (now - last).total_seconds() if last is not None else None
+        if age is not None and age < self.price_stale_alert_seconds:
+            self._price_stale_alerted = False
+            return False
+        if not self._price_stale_alerted:
+            self._price_stale_alerted = True
+            text = f"{age:.0f}초" if age is not None else "시작 후 계속"
+            log.error("시세 수신 중단 %s — 손절 감시가 REST 보정에만 의존 중", text)
+            self._log_safely("ERROR", "price_stale",
+                             f"시세 수신 중단 {text} (포지션 {len(self.portfolio.positions)}개)")
+            self._notify(EventKind.API_ERROR, "시세 수신 중단", f"{text} 동안 시세가 없습니다. 손절 감시가 약해진 상태",
+                         key="price_stale")
+        return True
 
     async def run(self, *, duration_seconds: float | None = None) -> EngineStats:
         self.status = "starting"
@@ -751,6 +823,7 @@ class TradingEngine:
                         log.error("설정 다시 읽기 실패: %s", exc)
                 if self.pending_orders:
                     await self.resolve_pending_orders(now)
+                self._check_price_staleness(now)
                 heartbeat_due = self._last_heartbeat is None or (
                     (now - self._last_heartbeat).total_seconds() >= self.heartbeat_interval
                 )
@@ -809,7 +882,7 @@ class TradingEngine:
             "candle_checks": s.candle_checks, "closed_candles": s.closed_candles, "signals": s.signals,
             "actionable_signals": s.actionable_signals, "orders_filled": s.orders_filled,
             "orders_rejected": s.orders_rejected, "orders_unknown": s.orders_unknown,
-            "orders_resolved": s.orders_resolved,
+            "orders_resolved": s.orders_resolved, "price_stream_restarts": s.price_stream_restarts,
             "risk_rejections": s.risk_rejections,
             "snapshots": s.snapshots, "price_updates": s.price_updates, "errors": s.errors,
             "exits_triggered": s.exits_triggered, "risk_locks": s.risk_locks, "last_equity": s.last_equity,
