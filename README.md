@@ -91,7 +91,7 @@ copy .env.example .env      # Windows
 | `RISK_COOLDOWN_SECONDS` | `0` | 청산 후 같은 마켓 재진입 대기(초) |
 | `LOG_LEVEL` / `LOG_DIR` | `INFO` / `logs` | 로그 레벨, 로그 폴더 (`logs/trader.log`, 10MB×5 회전) |
 | `DASHBOARD_HOST` / `DASHBOARD_PORT` | `127.0.0.1` / `8000` | 대시보드(`serve`) 바인드 주소·포트. 외부 바인드는 토큰 필수 |
-| `DASHBOARD_TOKEN` | 없음 | 설정하면 대시보드의 변경·제어 API 에 `X-Auth-Token` 필요. 없으면 로컬 호스트만 허용 |
+| `DASHBOARD_TOKEN` | 없음 | 설정하면 대시보드의 **모든** API·WebSocket 에 `X-Auth-Token` 헤더 필요(조회 포함). 없으면 로컬 호스트만 허용 |
 | `UPBIT_POCKET_ACCESS_KEY` / `UPBIT_POCKET_SECRET_KEY` | 없음 | 메인포켓에서 발급한 "포켓관리" 권한 키. 대시보드의 포켓 목록·메인→봇 KRW 이전에만 사용(주문에는 쓰지 않음) |
 | `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | 없음 | Telegram 알림 채널 (둘 다 있어야 켜짐) |
 | `DISCORD_WEBHOOK_URL` | 없음 | Discord 웹훅 알림 채널 |
@@ -149,7 +149,7 @@ copy .env.example .env      # Windows
 - **제어 탭**: 시작은 `python -m app.main run` 을 분리된 프로세스로 띄운다(로그 `logs/engine-{mode}.log`). 일시정지(신규 매수만 중단, 청산·손절은 계속)/재개/정지/긴급 정지/긴급 정지 해제/설정 다시 읽기는 `bot_commands` 큐로 전달되고 엔진이 2초 안에 처리한다. 강제 종료는 응답 없는 프로세스를 PID 로 내리는 마지막 수단이다. 엔진이 꺼져 있는 동안 큐에 쌓인 명령은 다음 시작 때 무시된다.
 - **LIVE 시작**: 상단 모드를 LIVE 로 바꾸고, `.env` 이중 플래그 + 확인 문구 `REAL-MONEY` 입력 + 브라우저 확인창까지 통과해야 한다. CLI 와 같은 3중 잠금이 그대로 적용되며 웹에서 우회할 수 없다.
 - **포켓 탭**: 봇 API Key 포켓의 잔고 조회, 봇 포켓 → 메인포켓 KRW 이전(봇 키에 "자산이전" 권한). 메인 → 봇 포켓 이전과 포켓 목록은 **메인포켓에서 발급한 "포켓관리" 권한 키**(`UPBIT_POCKET_ACCESS_KEY` / `UPBIT_POCKET_SECRET_KEY`)가 있을 때만 된다. 같은 계정 안의 이동일 뿐이며 외부 출금 API 는 없다.
-- **보안**: 기본 `127.0.0.1` 바인드. `DASHBOARD_TOKEN` 을 설정하면 변경·제어 API 에 `X-Auth-Token`(화면 상단 토큰 칸)이 필요하고, 설정하지 않으면 로컬 호스트에서만 변경을 허용한다. 외부 바인드는 토큰 없이는 거부된다. API Key 값은 화면·API 어디에도 나오지 않는다(설정 여부만 표시).
+- **보안**: 기본 `127.0.0.1` 바인드. `DASHBOARD_TOKEN` 을 설정하면 조회를 포함한 모든 `/api/*` 와 `/ws` 에 `X-Auth-Token` 헤더(화면 상단 토큰 칸)가 필요하다(상수 시간 비교, 실패 시 지연, URL 쿼리 토큰은 받지 않고 WebSocket 은 접속 직후 첫 메시지로 전달). 설정하지 않으면 로컬 호스트에서만 허용한다. 변경·제어 API 는 교차 출처(Origin/Sec-Fetch-Site) 요청과 JSON 이 아닌 본문을 거부하므로 외부 사이트의 폼 POST(CSRF)로 명령을 넣을 수 없다. 리버스 프록시 뒤에 둘 때는 프록시가 `X-Forwarded-For` 를 붙여야 하고(uvicorn 은 127.0.0.1 프록시만 신뢰), 그렇지 않으면 원격 요청이 로컬로 보이므로 반드시 토큰을 설정한다. API Key 값은 화면·API 어디에도 나오지 않는다(설정 여부만 표시).
 - API: `GET /api/status|balance|positions|performance|recent|orders|trades|signals|logs|strategy|settings|pockets|markets`, `GET /api/backtest/defaults|jobs|jobs/{id}`, `POST /api/backtest/jobs`, `POST /api/backtest/jobs/{id}/cancel`, `DELETE /api/backtest/jobs/{id}`, `GET /api/logs?limit&before_id&level&date_from&date_to&q`, `PUT /api/settings`, `POST /api/bot/start|pause|resume|stop|halt|resume-risk|reload|kill`, `POST /api/pockets/transfer`, `WS /ws` — 모두 `?mode=paper|live` 로 기록을 고른다.
 
 ### 알림 (Phase 9)

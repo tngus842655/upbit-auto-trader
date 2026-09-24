@@ -11,10 +11,12 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from fastapi import Body, Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, JSONResponse
@@ -40,6 +42,9 @@ log = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).resolve().parent.parent / "web" / "static"
 LOCAL_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
 COMMANDS = {"pause", "resume", "stop", "halt", "resume_risk", "reload"}
+AUTH_FAIL_DELAY = 0.3  # 인증 실패 시 지연(초) — 무차별 대입 완화
+WS_AUTH_TIMEOUT = 5.0  # WebSocket 첫 메시지(토큰) 대기(초)
+MUTATING_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 INTERVALS = [i.value for i in CandleInterval if i.value not in ("1s", "1w", "1M", "1y")]
 
 
@@ -55,9 +60,55 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
 
     app = FastAPI(title="upbit-auto-trader 대시보드", version="0.8")
 
+    # ------------------------------------------------------------------ 보안 (감사 HIGH-5)
+    def _token_ok(provided: str | None) -> bool:
+        token = settings.dashboard_token
+        if token is None or not provided:
+            return False
+        return hmac.compare_digest(provided.encode("utf-8"), token.get_secret_value().encode("utf-8"))
+
+    def _is_local_host(host: str | None) -> bool:
+        return (host or "") in LOCAL_HOSTS
+
+    def _same_origin(request: Request) -> bool:
+        """브라우저가 보낸 Origin(없으면 Referer)이 대시보드 호스트와 같은지. 둘 다 없으면(curl 등) 통과."""
+        origin = request.headers.get("origin") or request.headers.get("referer")
+        if not origin:
+            return True
+        return urlparse(origin).netloc.lower() == request.headers.get("host", "").lower()
+
+    async def _auth_problem(request: Request) -> tuple[int, str] | None:
+        """/api/* 공통 검사. (상태코드, 사유) 또는 None.
+
+        - 토큰이 설정돼 있으면 조회·변경 모두 X-Auth-Token 헤더가 필요하다 (쿼리스트링 토큰은 받지 않는다).
+        - 토큰이 없으면 로컬 호스트에서만 허용한다.
+        - 변경·제어(POST/PUT/PATCH/DELETE)는 교차 출처(Origin/Sec-Fetch-Site)를 거부하고, 본문이 있는 요청은
+          JSON 만 받는다 → 외부 사이트의 폼 POST(CSRF)로는 명령을 넣을 수 없다.
+        """
+        if settings.dashboard_token is not None:
+            if not _token_ok(request.headers.get("x-auth-token")):
+                await asyncio.sleep(AUTH_FAIL_DELAY)
+                return 401, "인증 토큰이 올바르지 않습니다 (X-Auth-Token 헤더)"
+        elif not _is_local_host(request.client.host if request.client else None):
+            return 403, "토큰 없이 원격에서 쓸 수 없습니다. DASHBOARD_TOKEN 을 설정하세요."
+        if request.method in MUTATING_METHODS:
+            fetch_site = request.headers.get("sec-fetch-site")
+            if fetch_site and fetch_site not in ("same-origin", "none"):
+                return 403, "교차 출처 요청은 거부합니다"
+            if not _same_origin(request):
+                return 403, "출처(Origin/Referer)가 대시보드와 다릅니다"
+            content_type = request.headers.get("content-type", "").lower()
+            if request.method in ("POST", "PUT", "PATCH") and not content_type.startswith("application/json"):
+                return 403, "변경·제어 API 는 JSON 본문만 받습니다 (Content-Type: application/json)"
+        return None
+
     @app.middleware("http")
-    async def _revalidate_static(request: Request, call_next):  # type: ignore[no-untyped-def]
-        """화면 파일은 갱신 후 바로 반영되도록 매번 재검증(ETag)한다 — 브라우저가 옛 app.js 를 쓰는 사고 방지."""
+    async def _guard(request: Request, call_next):  # type: ignore[no-untyped-def]
+        """/api/* 인증·CSRF 검사 + 화면 파일 재검증 헤더(갱신 즉시 반영)."""
+        if request.url.path.startswith("/api/"):
+            problem = await _auth_problem(request)
+            if problem is not None:
+                return JSONResponse({"detail": problem[1]}, status_code=problem[0])
         response = await call_next(request)
         if request.url.path == "/" or request.url.path.startswith("/static/"):
             response.headers["Cache-Control"] = "no-cache"
@@ -66,22 +117,6 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
     app.state.db = db
     app.state.service = service
     app.state.backtests = backtests
-
-    # ------------------------------------------------------------------ 보안
-    def _token_ok(provided: str | None) -> bool:
-        token = settings.dashboard_token
-        return token is not None and provided == token.get_secret_value()
-
-    def require_auth(request: Request) -> None:
-        if settings.dashboard_token is not None:
-            if not _token_ok(request.headers.get("X-Auth-Token") or request.query_params.get("token")):
-                raise HTTPException(status_code=401, detail="인증 토큰이 올바르지 않습니다 (X-Auth-Token)")
-            return
-        host = request.client.host if request.client else ""
-        if host not in LOCAL_HOSTS:
-            raise HTTPException(
-                status_code=403, detail="토큰 없이 원격에서 변경할 수 없습니다. DASHBOARD_TOKEN 을 설정하세요."
-            )
 
     def mode_param(mode: str = Query("paper", pattern="^(paper|live)$")) -> str:
         return mode
@@ -174,7 +209,7 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
             raise HTTPException(status_code=404, detail="백테스트 작업을 찾을 수 없습니다")
         return job
 
-    @app.post("/api/backtest/jobs", dependencies=[Depends(require_auth)])
+    @app.post("/api/backtest/jobs")
     async def api_backtest_submit(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         """현재 실행 설정(또는 요청값)으로 구간 × 마켓 백테스트를 백그라운드로 시작한다."""
         try:
@@ -186,13 +221,13 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
         service.repo("paper").log("INFO", "backtest_start", f"대시보드 백테스트 {job.label}", {"job": job.id})
         return job.to_dict(with_results=False)
 
-    @app.post("/api/backtest/jobs/{job_id}/cancel", dependencies=[Depends(require_auth)])
+    @app.post("/api/backtest/jobs/{job_id}/cancel")
     async def api_backtest_cancel(job_id: str) -> dict[str, Any]:
         if not await backtests.cancel(job_id):
             raise HTTPException(status_code=404, detail="실행 중인 백테스트 작업이 아닙니다")
         return {"cancelled": True, "id": job_id}
 
-    @app.delete("/api/backtest/jobs/{job_id}", dependencies=[Depends(require_auth)])
+    @app.delete("/api/backtest/jobs/{job_id}")
     async def api_backtest_delete(job_id: str) -> dict[str, Any]:
         """결과를 목록과 DB 에서 지운다 (실행 중이면 먼저 중단)."""
         if not await backtests.delete(job_id):
@@ -259,7 +294,7 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
             "created_at": from_db_time(record.created_at).astimezone(KST).isoformat(), "data": runtime.to_dict(),
         }
 
-    @app.put("/api/settings", dependencies=[Depends(require_auth)])
+    @app.put("/api/settings")
     async def api_settings_update(
         payload: dict[str, Any] = Body(...), mode: str = Depends(mode_param)
     ) -> dict[str, Any]:
@@ -284,7 +319,7 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
         return {"version": version, "changes": changes, "note": note, "data": new.to_dict()}
 
     # ------------------------------------------------------------------ 제어
-    @app.post("/api/bot/start", dependencies=[Depends(require_auth)])
+    @app.post("/api/bot/start")
     async def api_bot_start(
         payload: dict[str, Any] | None = Body(None), mode: str = Depends(mode_param)
     ) -> dict[str, Any]:
@@ -314,7 +349,7 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
         repo.log("INFO", "dashboard_start", f"대시보드에서 엔진 시작 요청 (pid {pid})", {"mode": mode})
         return {"started": True, "pid": pid, "mode": mode}
 
-    @app.post("/api/bot/kill", dependencies=[Depends(require_auth)])
+    @app.post("/api/bot/kill")
     async def api_bot_kill(mode: str = Depends(mode_param)) -> dict[str, Any]:
         repo = service.repo(mode)
         es = repo.read_engine_status()
@@ -325,7 +360,7 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
         repo.log("WARNING", "dashboard_kill", f"엔진 강제 종료 (pid {es.pid})")
         return {"killed": ok, "pid": es.pid}
 
-    @app.post("/api/bot/{command}", dependencies=[Depends(require_auth)])
+    @app.post("/api/bot/{command}")
     async def api_bot_command(command: str, payload: dict[str, Any] | None = Body(None),
                               mode: str = Depends(mode_param)) -> dict[str, Any]:
         command = command.replace("-", "_")
@@ -337,7 +372,7 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
         return {"queued": True, "command": command, "id": cmd_id, "engine_alive": alive, "engine_state": state}
 
     # ------------------------------------------------------------------ 포켓
-    @app.post("/api/notify/test", dependencies=[Depends(require_auth)])
+    @app.post("/api/notify/test")
     async def api_notify_test(payload: dict[str, Any] | None = Body(None)) -> dict[str, Any]:
         """설정된 알림 채널 전부에 테스트 메시지를 즉시 보낸다 (큐를 거치지 않음)."""
         manager = build_notification_manager(settings)
@@ -356,11 +391,11 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
         service.repo("paper").log("INFO", "notify_test", "대시보드 알림 테스트", {"results": results})
         return {"channels": manager.channels, "results": results, "ok": all(v is None for v in results.values())}
 
-    @app.get("/api/pockets", dependencies=[Depends(require_auth)])
+    @app.get("/api/pockets")
     async def api_pockets() -> dict[str, Any]:
         return await service.pockets()
 
-    @app.post("/api/pockets/transfer", dependencies=[Depends(require_auth)])
+    @app.post("/api/pockets/transfer")
     async def api_pockets_transfer(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         try:
             amount = float(payload.get("amount") or 0)
@@ -378,11 +413,28 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
 
     # ------------------------------------------------------------------ 실시간
     @app.websocket("/ws")
-    async def ws_live(websocket: WebSocket, mode: str = "paper", token: str | None = None) -> None:
-        if settings.dashboard_token is not None and not _token_ok(token):
-            await websocket.close(code=4401)
+    async def ws_live(websocket: WebSocket, mode: str = "paper") -> None:
+        """실시간 갱신. 토큰이 설정돼 있으면 접속 직후 첫 메시지 {"token": ...} 로 인증한다.
+
+        URL 에 토큰을 싣지 않는다 (서버 로그·프록시 노출 방지).
+        """
+        if mode not in ("paper", "live"):
+            await websocket.close(code=4400)
             return
         await websocket.accept()
+        if settings.dashboard_token is not None:
+            try:
+                first = await asyncio.wait_for(websocket.receive_json(), timeout=WS_AUTH_TIMEOUT)
+            except Exception:  # noqa: BLE001 - 시간 초과·형식 오류·끊김 모두 인증 실패
+                await websocket.close(code=4401)
+                return
+            if not _token_ok(first.get("token") if isinstance(first, dict) else None):
+                await asyncio.sleep(AUTH_FAIL_DELAY)
+                await websocket.close(code=4401)
+                return
+        elif not _is_local_host(websocket.client.host if websocket.client else None):
+            await websocket.close(code=4403)
+            return
         try:
             while True:
                 status = service.status(mode)

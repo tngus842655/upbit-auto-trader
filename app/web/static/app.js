@@ -415,9 +415,9 @@
       connectWs() {
         if (this.ws) { try { this.ws.close(); } catch (e) { /* noop */ } this.ws = null; }
         const proto = location.protocol === "https:" ? "wss" : "ws";
-        const url = `${proto}://${location.host}/ws?mode=${this.mode}${this.token ? "&token=" + encodeURIComponent(this.token) : ""}`;
-        const ws = new WebSocket(url);
-        ws.onopen = () => { this.wsConnected = true; };
+        const ws = new WebSocket(`${proto}://${location.host}/ws?mode=${this.mode}`);
+        // 토큰은 URL 이 아니라 접속 직후 첫 메시지로 보낸다 (서버 로그·프록시에 남지 않게)
+        ws.onopen = () => { if (this.token) ws.send(JSON.stringify({ token: this.token })); this.wsConnected = true; };
         ws.onclose = () => { this.wsConnected = false; setTimeout(() => { if (this.ws === ws) this.connectWs(); }, 5000); };
         ws.onerror = () => { this.wsConnected = false; };
         ws.onmessage = (ev) => {

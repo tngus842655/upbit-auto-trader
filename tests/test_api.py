@@ -6,6 +6,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
 
 from app.api import server as server_module
 from app.api.server import create_app
@@ -179,11 +180,11 @@ def test_settings_version_lookup_and_restore(api) -> None:
 
 def test_commands_and_start(api, monkeypatch) -> None:
     client, repo, _, _ = api
-    r = client.post("/api/bot/pause")
+    r = client.post("/api/bot/pause", json={})
     assert r.status_code == 200 and r.json()["queued"] and r.json()["engine_alive"] is False
     assert [c.command for c in repo.pending_commands()] == ["pause"]
-    assert client.post("/api/bot/resume-risk").json()["command"] == "resume_risk"
-    assert client.post("/api/bot/bogus").status_code == 404
+    assert client.post("/api/bot/resume-risk", json={}).json()["command"] == "resume_risk"
+    assert client.post("/api/bot/bogus", json={}).status_code == 404
 
     started = {}
     monkeypatch.setattr(
@@ -203,27 +204,62 @@ def test_commands_and_start(api, monkeypatch) -> None:
 
 def test_kill_uses_pid(api, monkeypatch) -> None:
     client, repo, _, _ = api
-    assert client.post("/api/bot/kill").status_code == 404
+    assert client.post("/api/bot/kill", json={}).status_code == 404
     repo.write_engine_status(status="RUNNING", pid=777)
     killed = []
     monkeypatch.setattr(server_module, "kill_engine", lambda pid: killed.append(pid) or True)
-    r = client.post("/api/bot/kill")
+    r = client.post("/api/bot/kill", json={})
     assert r.status_code == 200 and killed == [777]
     assert repo.read_engine_status().status == "STOPPED"
 
 
-def test_token_auth(make_settings) -> None:
+def test_token_auth(make_settings, monkeypatch) -> None:
+    """감사 HIGH-5: 토큰이 설정되면 조회를 포함한 모든 API·WebSocket 에 토큰이 필요하다."""
+    monkeypatch.setattr(server_module, "AUTH_FAIL_DELAY", 0.0)
     settings = make_settings(dashboard_token="secret-token")
     db = Database("sqlite://")
     db.create_all()
     client = TestClient(create_app(settings, db=db, public_client=FakePublicClient({})))
-    assert client.get("/api/status").status_code == 200  # 조회는 자유
-    assert client.post("/api/bot/pause").status_code == 401
-    assert client.post("/api/bot/pause", headers={"X-Auth-Token": "wrong"}).status_code == 401
-    assert client.post("/api/bot/pause", headers={"X-Auth-Token": "secret-token"}).status_code == 200
-    with client.websocket_connect("/ws?mode=paper&token=secret-token") as ws:
+    ok = {"X-Auth-Token": "secret-token"}
+    assert client.get("/api/status").status_code == 401  # 조회도 인증
+    assert client.get("/api/status", headers={"X-Auth-Token": "wrong"}).status_code == 401
+    assert client.get("/api/status?token=secret-token").status_code == 401  # 쿼리스트링 토큰은 받지 않는다
+    assert client.get("/api/status", headers=ok).status_code == 200
+    assert client.post("/api/bot/pause", json={}).status_code == 401
+    assert client.post("/api/bot/pause", json={}, headers=ok).status_code == 200
+    assert client.get("/").status_code == 200  # 화면 자체는 열린다 (토큰은 화면에서 입력)
+    with client.websocket_connect("/ws?mode=paper") as ws:
+        ws.send_json({"token": "secret-token"})
         msg = ws.receive_json()
         assert msg["type"] == "tick" and "status" in msg and "balance" in msg
+    with client.websocket_connect("/ws?mode=paper") as ws:
+        ws.send_json({"token": "wrong"})
+        with pytest.raises(WebSocketDisconnect) as info:
+            ws.receive_json()
+        assert info.value.code == 4401
+
+
+def test_local_mode_rejects_cross_site_and_remote(api, monkeypatch) -> None:
+    """감사 HIGH-5: 토큰 없는 로컬 모드에서도 외부 출처 폼 POST(CSRF)·원격 요청은 거부한다."""
+    client, repo, _, _ = api
+    evil = {"Origin": "https://evil.example", "Referer": "https://evil.example/"}
+    form = {"Content-Type": "application/x-www-form-urlencoded", **evil}
+    assert client.post("/api/bot/stop?mode=live", headers=form, content=b"").status_code == 403
+    assert client.post("/api/bot/halt?mode=live", headers=form, content=b"").status_code == 403
+    assert client.post("/api/bot/start?mode=paper", headers=form, content=b"").status_code == 403
+    assert client.post("/api/bot/halt", headers=evil, json={}).status_code == 403  # JSON 이어도 다른 출처면 거부
+    assert client.post("/api/bot/pause", headers={"Sec-Fetch-Site": "cross-site"}, json={}).status_code == 403
+    assert client.post("/api/bot/pause", headers={"Content-Type": "text/plain"}, content=b"x").status_code == 403
+    assert client.post("/api/bot/pause", headers={"Origin": "http://testserver"}, json={}).status_code == 200
+    assert client.get("/api/status", headers=evil).status_code == 200  # 조회는 출처 검사 없음 (로컬)
+    assert [c.command for c in repo.pending_commands()] == ["pause"]
+    assert Repository(client.app.state.db, "live").pending_commands() == []
+    remote = TestClient(client.app, client=("203.0.113.5", 40000))
+    assert remote.get("/api/status").status_code == 403
+    assert remote.post("/api/bot/pause", json={}).status_code == 403
+    with remote.websocket_connect("/ws?mode=paper") as ws, pytest.raises(WebSocketDisconnect) as info:
+        ws.receive_json()
+    assert info.value.code == 4403
 
 
 def test_pockets_endpoints(api, monkeypatch) -> None:

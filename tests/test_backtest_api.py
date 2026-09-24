@@ -168,7 +168,7 @@ def test_backtest_api_flow(make_settings, tmp_path) -> None:
         # DB 에 남아 있어 새 실행기(서버 재시작)에서도 같은 결과가 보인다
         fresh = BacktestRunner(settings, loader=fake_loader, save_dir=tmp_path, repo=Repository(db, "paper"))
         assert fresh.get_dict(job_id)["results"][0]["metrics"]["total_trades"] > 0
-        assert client.post("/api/backtest/jobs/nope/cancel").status_code == 404
+        assert client.post("/api/backtest/jobs/nope/cancel", json={}).status_code == 404
         assert client.delete(f"/api/backtest/jobs/{job_id}").json()["deleted"] is True
         assert client.get(f"/api/backtest/jobs/{job_id}").status_code == 404
         assert client.delete("/api/backtest/jobs/nope").status_code == 404
