@@ -66,6 +66,7 @@ class FakeClient:
         self.created: list[dict] = []
         self.cancelled: list[str] = []
         self.identifier_lookups: list[str] = []
+        self.uuid_lookups = 0
         self.allow = allow
 
     @property
@@ -99,6 +100,7 @@ class FakeClient:
             if not found:
                 raise UpbitAPIError(404, "order_not_found", "not found")
             return found[0]
+        self.uuid_lookups += 1
         return self.order_states.pop(0) if len(self.order_states) > 1 else self.order_states[0]
 
     async def cancel_order(self, *, uuid=None, identifier=None):
@@ -396,6 +398,69 @@ class TestUnknownAndResolve:
         broker6 = LiveBroker(FakeClient(order_states=[]), Portfolio(1_000_000), settings, sleep=no_sleep)
         final6 = await broker6.resolve_order(unknown_order(None, "c6"), NOW)
         assert final6.status is OrderStatus.REJECTED and "미생성" in final6.error
+
+
+class TestFillWithoutTrades:
+    """감사 MEDIUM-1 — 체결 목록이 비어 있을 때 시장가 매수의 price(총액)를 단가로 쓰지 않는다."""
+
+    def test_fill_funds_by_order_type(self) -> None:
+        buy_done = order_info("u1", side="bid", state="done", executed="0.001", fee="50", price="100000")
+        assert buy_done.fill_funds() == Decimal("100000")  # 시장가 매수 done: 총액 전부 사용
+        buy_partial = order_info("u2", side="bid", state="cancel", executed="0.0004", fee="20", price="100000")
+        assert buy_partial.fill_funds() is None  # 부분 체결 뒤 취소: 쓴 금액을 알 수 없다
+        sell_done = order_info("u3", side="ask", state="done", executed="0.001", fee="50")
+        assert sell_done.fill_funds() is None  # 시장가 매도: 단가 정보 없음
+        limit = OrderInfo.model_validate({
+            "market": M, "uuid": "u4", "side": "bid", "ord_type": "limit", "state": "done", "created_at": "x",
+            "executed_volume": "0.5", "price": "200", "trades": [],
+        })
+        assert limit.fill_funds() == Decimal("100")  # 지정가: 단가 × 체결 수량
+        with_trades = order_info("u5", side="ask", state="done", executed="0.001",
+                                 trades=[trade("100000000", "0.001", "ask")])
+        assert with_trades.fill_funds() == Decimal("100000")
+        assert order_info("u6", side="bid", state="cancel").fill_funds() == 0
+
+    async def test_market_buy_without_trades_uses_order_total(self, make_settings) -> None:
+        """총액 100,000원·체결 0.001 BTC 응답에 trades 가 없어도 단가 1억·현금 차감 100,050원으로 반영한다."""
+        done = order_info("u1", side="bid", state="done", executed="0.001", fee="50", price="100000")
+        client = FakeClient(create_results=[order_info("u1", side="bid", state="wait", price="100000")],
+                            order_states=[done])
+        portfolio = Portfolio(1_000_000)
+        broker = LiveBroker(client, portfolio, armed_settings(make_settings), sleep=no_sleep,
+                            trades_lookup_attempts=2)
+        order = await broker.execute(OrderRequest(M, Side.BUY, amount=100_000, client_id="c1"), None, NOW)
+        assert order.status is OrderStatus.FILLED
+        assert order.fill_price == pytest.approx(100_000_000)
+        assert portfolio.position(M).avg_price == pytest.approx(100_000_000)
+        assert portfolio.cash == pytest.approx(1_000_000 - 100_000 - 50)
+        assert client.uuid_lookups == 3  # 폴링 1회 + 체결 목록 재조회 2회
+
+    async def test_market_sell_without_trades_is_unknown_until_trades_arrive(self, make_settings) -> None:
+        """시장가 매도는 price 가 없어 체결 목록 없이는 금액을 모른다 → UNKNOWN, 목록이 오면 확정."""
+        portfolio = Portfolio(1_000_000)
+        portfolio.buy(M, 100_000_000, time=NOW, quantity=0.005, enforce_limits=False)
+        no_trades = order_info("u1", side="ask", state="done", executed="0.005", fee="250")
+        client = FakeClient(chance_obj=chance(btc="0.005"), create_results=[no_trades], order_states=[no_trades])
+        broker = LiveBroker(client, portfolio, armed_settings(make_settings), sleep=no_sleep, trades_lookup_attempts=1)
+        order = await broker.execute(OrderRequest(M, Side.SELL, quantity=0.005, client_id="s1"), None, NOW)
+        assert order.status is OrderStatus.UNKNOWN and "체결 금액 미확인" in order.error
+        assert order.exchange_order_id == "u1" and "s1" in broker.processed
+        assert portfolio.position(M).quantity == 0.005 and portfolio.cash == pytest.approx(499_750)  # 반영 안 됨
+        # 아직도 목록이 없으면 None (UNKNOWN 유지)
+        assert await broker.resolve_order(order, NOW) is None and order.status is OrderStatus.UNKNOWN
+        # 체결 목록이 채워지면 확정
+        client.order_states = [order_info("u1", side="ask", state="done", executed="0.005", fee="250",
+                                          trades=[trade("100000000", "0.005", "ask")])]
+        final = await broker.resolve_order(order, NOW)
+        assert final is order and final.status is OrderStatus.FILLED and final.fill_price == pytest.approx(100_000_000)
+        assert not portfolio.has_position(M) and portfolio.cash == pytest.approx(499_750 + 500_000 - 250)
+
+    async def test_partial_cancelled_buy_without_trades_stays_unknown(self, make_settings) -> None:
+        partial = order_info("u2", side="bid", state="cancel", executed="0.0004", fee="20", price="100000")
+        broker = LiveBroker(FakeClient(order_states=[partial]), Portfolio(1_000_000), armed_settings(make_settings),
+                            sleep=no_sleep, trades_lookup_attempts=1)
+        order = unknown_order("u2")
+        assert await broker.resolve_order(order, NOW) is None and order.status is OrderStatus.UNKNOWN
 
 
 async def test_reconcile_aligns_internal_portfolio_to_exchange(make_settings) -> None:

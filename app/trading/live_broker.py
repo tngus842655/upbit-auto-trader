@@ -97,6 +97,7 @@ class LiveBroker:
         max_attempts: int = 2,
         lookup_attempts: int = 5,
         lookup_backoff: float = 1.0,
+        trades_lookup_attempts: int = 3,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.client = client
@@ -108,6 +109,7 @@ class LiveBroker:
         self.max_attempts = max_attempts
         self.lookup_attempts = max(1, lookup_attempts)
         self.lookup_backoff = lookup_backoff
+        self.trades_lookup_attempts = max(0, trades_lookup_attempts)  # 체결 목록이 비어 있을 때 다시 받는 횟수
         self._sleep = sleep
         self.last_chance: dict[str, Any] | None = None
 
@@ -251,8 +253,20 @@ class LiveBroker:
                 log.warning("취소 접수 실패(이미 체결됐을 수 있음): %s", exc)
             await self._sleep(self.poll_interval)
             current = await self.client.get_order(uuid=info.uuid)
-        if not current.trades and current.executed_volume > 0:
-            current = await self.client.get_order(uuid=info.uuid)  # 목록 응답에는 trades 가 없을 수 있다
+        return await self._refresh_trades(current)
+
+    async def _refresh_trades(self, info: OrderInfo) -> OrderInfo:
+        """체결이 있는데 체결 목록이 비어 있으면(체결 직후 지연·목록 응답) 개별 조회로 몇 번 다시 받는다."""
+        current = info
+        for _ in range(self.trades_lookup_attempts):
+            if current.trades or current.executed_volume <= 0:
+                break
+            await self._sleep(self.poll_interval)
+            try:
+                current = await self.client.get_order(uuid=info.uuid)
+            except UpbitError as exc:
+                log.warning("주문 %s 체결 목록 재조회 실패: %s", info.uuid, exc)
+                break
         return current
 
     def _apply_fill(self, order: Order, info: OrderInfo, now: datetime) -> Order:
@@ -261,8 +275,19 @@ class LiveBroker:
             order.status = OrderStatus.CANCELLED if info.state == "cancel" else OrderStatus.REJECTED
             order.error = f"체결 없음 (거래소 상태 {info.state}, uuid {info.uuid})"
             return order
-        funds = float(info.executed_funds) if info.trades else 0.0
-        avg_price = funds / executed if funds > 0 else float(info.price or 0) or 0.0
+        funds = info.fill_funds()
+        if funds is None or funds <= 0:
+            # 체결 목록이 없고 주문 종류로도 체결 금액을 알 수 없다 (시장가 매도·부분 체결 뒤 취소).
+            # 시장가 매수의 price(총액)를 단가로 쓰면 평균가·현금이 크게 틀리므로(감사 MEDIUM-1) 반영하지 않고
+            # UNKNOWN 으로 남겨 후속 조회로 확정한다.
+            order.status = OrderStatus.UNKNOWN
+            order.error = (
+                f"체결 금액 미확인 — 체결 수량 {executed:.8f} 인데 체결 목록이 비어 있음 "
+                f"(uuid {info.uuid}, {info.ord_type}/{info.state}), 후속 조회로 확정"
+            )
+            log.warning("주문 %s %s: %s", order.market, order.side.value, order.error)
+            return order
+        avg_price = float(funds) / executed
         fee = float(info.paid_fee)
         reason = f"{order.reason} [upbit {info.uuid[:8]}]".strip()
         try:
@@ -321,10 +346,11 @@ class LiveBroker:
                 with contextlib.suppress(UpbitError):
                     await self.client.cancel_order(uuid=info.uuid)
             return None
-        if not info.trades and info.executed_volume > 0:
-            with contextlib.suppress(UpbitError):
-                info = await self.client.get_order(uuid=info.uuid)
-        return self._apply_fill(order, info, now)
+        info = await self._refresh_trades(info)
+        final = self._apply_fill(order, info, now)
+        if final.status is OrderStatus.UNKNOWN:
+            return None  # 체결 금액을 아직 모른다 → 다음 조회에서 다시 (시한이 지나면 엔진이 잔고 동기화로 정리)
+        return final
 
     @staticmethod
     def _reject(order: Order, error: str) -> Order:

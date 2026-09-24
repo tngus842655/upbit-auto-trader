@@ -90,6 +90,7 @@
 - `DELETE /v1/order?uuid=|identifier=` 취소 접수. `GET /v1/orders/open?market&states[]&page&limit&order_by` 체결 대기, `GET /v1/orders/closed` 종료 주문.
 - `GET /v1/orders/chance?market=` 주문 가능 정보: `bid_fee`/`ask_fee`, `market.state`, `market.bid.min_total`/`ask.min_total`, `max_total`, `bid_types`/`ask_types`, `bid_account`/`ask_account` 잔고.
 - Order 필드: `uuid`, `state`(wait/watch/done/cancel), `executed_volume`, `paid_fee`, `locked`, `trades_count`, `remaining_volume`, `reserved_fee` 등. 숫자는 문자열 소수.
+  * `price` 는 **지정가면 단가, 시장가 매수(`ord_type=price`)면 매수 총액**이다 (문서 원문 "주문 단가 또는 총액", 2026-09-24 확인). 체결 단가는 `trades[]` 의 `price`/`funds` 로만 알 수 있고, 응답에 `executed_funds` 같은 체결 금액 필드는 없다. 프로젝트는 `OrderInfo.fill_funds()` 로 종류별 체결 금액을 계산하고, 모르면 반영하지 않는다(감사 MEDIUM-1).
 - 권한: 조회는 [주문조회], 생성·취소는 [주문하기]. 에러: `insufficient_funds_bid/ask`, `under_min_total_bid/ask`, `create_bid_error`, `duplicated_identifier`, `out_of_scope`(권한 없음).
 
 ## 주문 관련 참고 (원문 유지)

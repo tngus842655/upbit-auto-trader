@@ -299,6 +299,26 @@ class OrderInfo(UpbitModel):
             return self.executed_funds / self.executed_volume
         return None
 
+    def fill_funds(self) -> Decimal | None:
+        """체결 금액(KRW). 체결 목록이 있으면 그 합계, 없으면 주문 종류로 알 수 있는 경우에만 계산한다 (감사 MEDIUM-1).
+
+        - ``ord_type=price``(시장가 매수)의 ``price`` 는 단가가 아니라 **매수 총액**이다
+          (공식 문서: "지정가 주문의 경우 단가, 시장가 매수 주문의 경우 매수 총액"). ``done`` 이면 총액이 전부
+          쓰인 것으로 본다 — 거래소가 돌려주는 잔돈은 최소 호가 단위 미만이라 단가 오차는 무시할 수 있다.
+          부분 체결 뒤 취소면 쓴 금액을 알 수 없다 → None.
+        - ``ord_type=limit`` 은 ``price`` 가 단가 → price × executed_volume.
+        - ``ord_type=market``(시장가 매도)·``best`` 는 단가 정보가 없다 → None (체결 목록을 다시 받아야 한다).
+        """
+        if self.trades:
+            return self.executed_funds
+        if self.executed_volume <= 0:
+            return Decimal("0")
+        if self.ord_type == "price" and self.price is not None and self.state == "done":
+            return self.price
+        if self.ord_type == "limit" and self.price is not None:
+            return self.price * self.executed_volume
+        return None
+
 
 class OrderChance(UpbitModel):
     """``GET /v1/orders/chance`` — 수수료율, 페어 제약(최소 주문 금액 등), 양쪽 계좌 잔고."""
