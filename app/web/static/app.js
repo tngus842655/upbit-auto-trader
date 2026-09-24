@@ -2,6 +2,8 @@
 (function () {
   const { createApp } = Vue;
   let equityChart = null; // 자산 곡선 Chart.js 인스턴스 (반응형 상태 밖 — Proxy 로 감싸면 Chart.js 내부가 깨진다)
+  let btChart = null; // 백테스트 자산 곡선
+  const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
   const RISK_LABELS = {
     position_fraction: "현금 사용 비율", max_order_amount: "거래당 최대 투자금 (KRW)", max_position_ratio: "자산 대비 포지션 상한",
@@ -36,7 +38,8 @@
         token: localStorage.getItem("token") || "",
         tab: "dashboard",
         tabs: [
-          { id: "dashboard", label: "대시보드" }, { id: "settings", label: "설정" }, { id: "control", label: "제어" },
+          { id: "dashboard", label: "대시보드" }, { id: "settings", label: "설정" }, { id: "backtest", label: "백테스트" },
+          { id: "control", label: "제어" },
           { id: "pockets", label: "포켓 · 자산 이전" }, { id: "logs", label: "로그" },
         ],
         status: {}, balance: {}, perf: {}, recent: {}, latestSignal: null, logs: [], logLevel: "",
@@ -45,9 +48,14 @@
         pockets: {}, transfer: { direction: "to_main", amount: 0, bot_pocket_uuid: null }, transferResult: null,
         showDust: false,
         // 코인 선택 팝업 (설정 탭)
-        picker: { open: false, loading: false, error: null, data: null, query: "", onlySelected: false, selected: new Set(),
+        picker: { open: false, loading: false, error: null, data: null, query: "", onlySelected: false, selected: new Set(), target: "settings",
           sort: { key: "acc_trade_price_24h", desc: true } },
         marketCatalog: {},  // 코드 → 한글 이름
+        // 백테스트 탭
+        bt: { marketsText: "", interval: "", years: {}, recent: { 3: false, 6: false, 12: false }, custom: { enabled: false, start: "", end: "" },
+          capital: 1000000, feePct: 0.05, slippagePct: 0.05, useRisk: false, submitting: false, error: null,
+          job: null, jobs: [], selectedJobId: "", selected: null, timer: null },
+        btDefaults: { years: [], today: "" },
         confirmLive: "", wsConnected: false, ws: null, toast: null, timers: [],
       };
     },
@@ -61,6 +69,26 @@
       },
       modeLabel() { return this.mode === "live" ? "실거래" : "모의매매"; },
       selectedMarkets() { return this.form ? this.form.marketsText.split(",").map((m) => m.trim().toUpperCase()).filter(Boolean) : []; },
+      currentYear() { return new Date().getFullYear(); },
+      btMarkets() { return this.bt.marketsText.split(",").map((m) => m.trim().toUpperCase()).filter(Boolean); },
+      btRunning() { return !!this.bt.job && (this.bt.job.status === "queued" || this.bt.job.status === "running"); },
+      btProgressPct() { const j = this.bt.job; return j && j.total ? Math.round((j.progress / j.total) * 100) : 0; },
+      btPeriods() {
+        const out = [];
+        for (const y of this.btDefaults.years) if (this.bt.years[y]) out.push({ label: `${y}년`, start: `${y}-01-01`, end: y < this.currentYear ? `${y + 1}-01-01` : null });
+        for (const n of [3, 6, 12]) if (this.bt.recent[n]) { const d = new Date(); d.setMonth(d.getMonth() - n); out.push({ label: `최근 ${n}개월`, start: isoDate(d), end: null }); }
+        if (this.bt.custom.enabled && this.bt.custom.start) out.push({ label: `${this.bt.custom.start} ~ ${this.bt.custom.end || '오늘'}`, start: this.bt.custom.start, end: this.bt.custom.end || null });
+        return out;
+      },
+      btResult() { const j = this.bt.job; const r = j && this.bt.selected != null ? j.results[this.bt.selected] : null; return r && !r.error ? r : null; },
+      btSummary() {
+        const j = this.bt.job; if (!j || !j.results.length) return "";
+        const ok = j.results.filter((r) => !r.error); if (!ok.length) return "";
+        const avg = ok.reduce((a, r) => a + r.metrics.total_return, 0) / ok.length;
+        const beat = ok.filter((r) => r.metrics.total_return > r.benchmark.total_return).length;
+        const pos = ok.filter((r) => r.metrics.total_return > 0).length;
+        return `${ok.length}건 평균 수익률 ${this.pct(avg)} · 수익 난 구간 ${pos}건 · 단순 보유보다 나은 구간 ${beat}건`;
+      },
       pickerRows() {
         const data = this.picker.data;
         if (!data) return [];
@@ -152,6 +180,8 @@
           for (const f of schemaFields(this.meta.schemas[d.strategy_name])) if (this.form.strategy_params[f.name] == null) this.form.strategy_params[f.name] = f.default;
           this.saveResult = null; this.formErrors = [];
           if (!this.picker.data && !this.picker.loading) this.loadMarketCatalog();  // 선택된 마켓의 한글 이름 표시용
+          this.syncBacktestFromSettings();
+          if (!this.btDefaults.years.length) this.loadBacktestDefaults();
         } catch (e) { this.notify("설정 조회 실패: " + e.message, "bad"); }
       },
       resetParams() {
@@ -223,8 +253,9 @@
         } catch (e) { this.picker.error = "코인 목록 조회 실패: " + e.message; }
         this.picker.loading = false;
       },
-      openMarketPicker() {
-        this.picker.selected = new Set(this.selectedMarkets);
+      openMarketPicker(target) {
+        this.picker.target = target === "backtest" ? "backtest" : "settings";
+        this.picker.selected = new Set(this.picker.target === "backtest" ? this.btMarkets : this.selectedMarkets);
         this.picker.query = ""; this.picker.onlySelected = false; this.picker.open = true;
         if (!this.picker.data && !this.picker.loading) this.loadMarketCatalog();
       },
@@ -233,7 +264,85 @@
         if (this.picker.sort.key === key) this.picker.sort.desc = !this.picker.sort.desc;
         else this.picker.sort = { key, desc: key !== "korean_name" };
       },
-      applyPicker() { this.form.marketsText = Array.from(this.picker.selected).join(","); this.picker.open = false; },
+      applyPicker() {
+        const text = Array.from(this.picker.selected).join(",");
+        if (this.picker.target === "backtest") this.bt.marketsText = text; else this.form.marketsText = text;
+        this.picker.open = false;
+      },
+      removeBtMarket(code) { this.bt.marketsText = this.btMarkets.filter((m) => m !== code).join(","); },
+      // ---------- 백테스트
+      paramsSummary(params) { return Object.entries(params || {}).map(([k, v]) => `${k}=${v}`).join(", "); },
+      btStatusLabel(s) { return { queued: "대기", running: "실행 중", done: "완료", error: "오류", cancelled: "중단" }[s] || s; },
+      async loadBacktestDefaults() {
+        try {
+          const d = await this.api("/api/backtest/defaults");
+          this.btDefaults = d;
+          const years = {}; for (const y of d.years) years[y] = y >= this.currentYear - 1;  // 올해·작년 기본 선택
+          this.bt.years = years;
+          this.bt.capital = d.initial_capital; this.bt.feePct = +(d.fee_rate * 100).toFixed(4); this.bt.slippagePct = +(d.slippage_rate * 100).toFixed(4);
+          this.bt.jobs = await this.api("/api/backtest/jobs");
+        } catch (e) { /* noop */ }
+      },
+      syncBacktestFromSettings() {
+        if (!this.form) return;
+        if (!this.bt.marketsText) this.bt.marketsText = this.form.marketsText;
+        if (!this.bt.interval) this.bt.interval = this.form.candle_interval;
+      },
+      async runBacktest() {
+        if (!this.form) return;
+        const risk = {};
+        for (const f of this.riskFields) { const v = this.form.risk[f.name]; risk[f.name] = f.nullable && !this.form.riskEnabled[f.name] ? null : (v === "" ? null : v); }
+        const body = { markets: this.btMarkets, candle_interval: this.bt.interval || this.form.candle_interval, strategy_name: this.form.strategy_name,
+          strategy_params: this.form.strategy_params, periods: this.btPeriods, initial_capital: this.bt.capital,
+          fee_rate: this.bt.feePct / 100, slippage_rate: this.bt.slippagePct / 100, use_risk: this.bt.useRisk, risk: this.bt.useRisk ? risk : null,
+          settings_version: this.settingsVersion };
+        this.bt.submitting = true; this.bt.error = null; this.bt.selected = null;
+        try {
+          const job = await this.api("/api/backtest/jobs", { method: "POST", body });
+          this.bt.job = { ...job, results: [] }; this.bt.selectedJobId = job.id;
+          this.notify(`백테스트 시작 (${job.total}건)`, "ok");
+          this.pollBacktest(job.id);
+        } catch (e) { this.bt.error = e.message; this.notify("백테스트 실행 실패: " + e.message, "bad"); }
+        this.bt.submitting = false;
+      },
+      pollBacktest(id) {
+        if (this.bt.timer) clearTimeout(this.bt.timer);
+        this.bt.timer = setTimeout(async () => {
+          try {
+            const job = await this.api(`/api/backtest/jobs/${id}`);
+            this.bt.job = job;
+            if (job.status === "queued" || job.status === "running") { this.pollBacktest(id); return; }
+            this.bt.jobs = await this.api("/api/backtest/jobs");
+            if (this.bt.selected == null) this.selectBtResult(job.results.findIndex((r) => !r.error));
+            this.notify(job.status === "done" ? `백테스트 완료: ${job.ok}건 성공, ${job.failed}건 실패` : "백테스트 " + this.btStatusLabel(job.status), job.status === "done" ? "ok" : "bad");
+          } catch (e) { this.bt.error = e.message; }
+        }, 1500);
+      },
+      async cancelBacktest() {
+        if (!this.bt.job) return;
+        try { await this.api(`/api/backtest/jobs/${this.bt.job.id}`, { method: "DELETE" }); } catch (e) { this.notify("중단 실패: " + e.message, "bad"); }
+      },
+      async loadBacktestJob(id) {
+        if (!id) return;
+        try {
+          this.bt.job = await this.api(`/api/backtest/jobs/${id}`); this.bt.selected = null;
+          this.selectBtResult(this.bt.job.results.findIndex((r) => !r.error));
+          if (this.btRunning) this.pollBacktest(id);
+        } catch (e) { this.notify("결과 조회 실패: " + e.message, "bad"); }
+      },
+      selectBtResult(i) { if (i == null || i < 0) return; this.bt.selected = i; this.$nextTick(() => this.renderBtChart()); },
+      renderBtChart() {
+        const el = document.getElementById("btChart"); const r = this.btResult;
+        if (!el || !window.Chart || !r) return;
+        if (btChart && btChart.canvas !== el) { btChart.destroy(); btChart = null; }
+        const data = { labels: r.equity.map((p) => this.fmtTime(p.time)), datasets: [
+          { label: "전략", data: r.equity.map((p) => p.value), borderColor: "#4f8cff", backgroundColor: "rgba(79,140,255,0.12)", fill: true, tension: 0.2, pointRadius: 0 },
+          { label: "단순 보유", data: r.benchmark_equity.map((p) => p.value), borderColor: "#8a93a6", borderDash: [4, 4], fill: false, tension: 0.2, pointRadius: 0 },
+        ] };
+        if (btChart) { btChart.data = data; btChart.update(); return; }
+        btChart = new Chart(el, { type: "line", data, options: { responsive: true, animation: false, plugins: { legend: { display: true, labels: { color: "#8a93a6" } } },
+          scales: { x: { ticks: { maxTicksLimit: 8, color: "#8a93a6" }, grid: { color: "#233" } }, y: { ticks: { color: "#8a93a6", callback: (v) => Math.round(v).toLocaleString() }, grid: { color: "#233" } } } } });
+      },
       removeMarket(code) { this.form.marketsText = this.selectedMarkets.filter((m) => m !== code).join(","); },
       async loadPockets() { try { this.pockets = await this.api("/api/pockets"); } catch (e) { this.pockets = { error: e.message }; } },
       async doTransfer() {

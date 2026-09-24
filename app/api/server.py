@@ -20,6 +20,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
+from app.api.backtests import BacktestRequest, BacktestRunner
 from app.api.process import engine_is_alive, kill_engine, start_engine
 from app.api.services import DashboardService, describe_api_error
 from app.config.settings import Settings, TradingMode, get_settings
@@ -42,17 +43,20 @@ INTERVALS = [i.value for i in CandleInterval if i.value not in ("1s", "1w", "1M"
 
 
 def create_app(settings: Settings | None = None, *, db: Database | None = None,
-               public_client: UpbitClient | None = None, service: DashboardService | None = None) -> FastAPI:
+               public_client: UpbitClient | None = None, service: DashboardService | None = None,
+               backtests: BacktestRunner | None = None) -> FastAPI:
     settings = settings or get_settings()
     db = db or Database(settings.database_url)
     db.create_all()
     public_client = public_client or UpbitClient(base_url=settings.upbit_api_url, timeout=settings.http_timeout_seconds)
     service = service or DashboardService(settings, db, public_client)
+    backtests = backtests or BacktestRunner(settings)
 
     app = FastAPI(title="upbit-auto-trader 대시보드", version="0.8")
     app.state.settings = settings
     app.state.db = db
     app.state.service = service
+    app.state.backtests = backtests
 
     # ------------------------------------------------------------------ 보안
     def _token_ok(provided: str | None) -> bool:
@@ -131,6 +135,40 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
             return await service.markets(quote, force=refresh)
         except TraderError as exc:
             raise HTTPException(status_code=502, detail=describe_api_error(exc)) from exc
+
+    # ------------------------------------------------------------------ 백테스트 (실제 주문 없음)
+    @app.get("/api/backtest/defaults")
+    async def api_backtest_defaults() -> dict[str, Any]:
+        return backtests.defaults()
+
+    @app.get("/api/backtest/jobs")
+    async def api_backtest_jobs() -> list[dict[str, Any]]:
+        return backtests.list_jobs()
+
+    @app.get("/api/backtest/jobs/{job_id}")
+    async def api_backtest_job(job_id: str) -> dict[str, Any]:
+        job = backtests.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="백테스트 작업을 찾을 수 없습니다")
+        return job.to_dict()
+
+    @app.post("/api/backtest/jobs", dependencies=[Depends(require_auth)])
+    async def api_backtest_submit(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """현재 실행 설정(또는 요청값)으로 구간 × 마켓 백테스트를 백그라운드로 시작한다."""
+        try:
+            request = BacktestRequest(**payload)
+        except ValidationError as exc:
+            errors = [{"field": ".".join(str(p) for p in e["loc"]), "message": e["msg"]} for e in exc.errors()]
+            raise HTTPException(status_code=422, detail=errors) from exc
+        job = backtests.submit(request)
+        service.repo("paper").log("INFO", "backtest_start", f"대시보드 백테스트 {job.label}", {"job": job.id})
+        return job.to_dict(with_results=False)
+
+    @app.delete("/api/backtest/jobs/{job_id}", dependencies=[Depends(require_auth)])
+    async def api_backtest_cancel(job_id: str) -> dict[str, Any]:
+        if not await backtests.cancel(job_id):
+            raise HTTPException(status_code=404, detail="백테스트 작업을 찾을 수 없습니다")
+        return {"cancelled": True, "id": job_id}
 
     # ------------------------------------------------------------------ 전략 · 설정
     def _current_runtime(mode: str) -> tuple[RuntimeSettings, int]:

@@ -258,6 +258,123 @@
     </section>
   </main>
 
+  <!-- ===================== 백테스트 ===================== -->
+  <main v-show="tab === 'backtest'" class="page">
+    <section class="grid two">
+      <div class="card">
+        <h3>백테스트 설정 <span class="muted small">실제 주문 없음 · 과거 캔들로 시뮬레이션</span></h3>
+        <p class="muted small">현재 실행 설정 <b>v{{ settingsVersion }}</b>의 전략·파라미터를 그대로 씁니다. 설정 탭에서 바꿔 저장하면 여기에도 반영됩니다. 마켓·캔들 단위·기간·수수료는 여기서 따로 정할 수 있고 실행 설정은 바뀌지 않습니다.</p>
+        <div class="form" v-if="form">
+          <div class="field"><span>전략 (현재 설정)</span>
+            <div class="note small">{{ form.strategy_name }} · {{ paramsSummary(form.strategy_params) }}</div>
+          </div>
+          <div class="field"><span>거래 대상 마켓</span>
+            <div class="row">
+              <input :value="bt.marketsText" readonly placeholder="코인 검색 버튼으로 선택하세요" style="flex:1" @click="openMarketPicker('backtest')">
+              <button type="button" class="small" @click="openMarketPicker('backtest')">🔍 코인 검색</button>
+              <button type="button" class="small" @click="bt.marketsText = form.marketsText" title="설정 탭의 마켓으로 되돌립니다">현재 설정과 같게</button>
+            </div>
+            <div class="chips">
+              <span v-for="m in btMarkets" :key="m" class="chip">{{ marketName(m) }} <b>{{ m }}</b><a @click.prevent="removeBtMarket(m)" title="제거">×</a></span>
+              <span v-if="!btMarkets.length" class="muted small">선택된 마켓이 없습니다</span>
+            </div>
+          </div>
+          <label class="field"><span>캔들 단위</span>
+            <select v-model="bt.interval"><option v-for="i in meta.intervals" :key="i" :value="i">{{ i }}{{ i === form.candle_interval ? ' (현재 설정)' : '' }}</option></select>
+          </label>
+          <div class="field"><span>기간 <em>여러 개 고르면 구간별로 따로 돌려 비교합니다</em></span>
+            <div class="row wrap">
+              <label class="inline" v-for="y in btDefaults.years" :key="y"><input type="checkbox" v-model="bt.years[y]"> {{ y }}년{{ y === currentYear ? ' (오늘까지)' : '' }}</label>
+            </div>
+            <div class="row wrap">
+              <label class="inline" v-for="n in [3, 6, 12]" :key="n"><input type="checkbox" v-model="bt.recent[n]"> 최근 {{ n }}개월</label>
+            </div>
+            <div class="row wrap">
+              <label class="inline"><input type="checkbox" v-model="bt.custom.enabled"> 직접 지정</label>
+              <input type="date" v-model="bt.custom.start" :disabled="!bt.custom.enabled">
+              <span class="muted">~</span>
+              <input type="date" v-model="bt.custom.end" :disabled="!bt.custom.enabled" title="비우면 오늘까지">
+            </div>
+          </div>
+          <div class="fields">
+            <label class="field"><span>초기 자본 (원)</span><input type="number" min="5000" step="10000" v-model.number="bt.capital"></label>
+            <label class="field"><span>거래소 수수료 (편도, %) <em>업비트 원화 마켓 0.05</em></span><input type="number" min="0" max="5" step="0.01" v-model.number="bt.feePct"></label>
+            <label class="field"><span>슬리피지 (%) <em>시장가 체결 손실 가정</em></span><input type="number" min="0" max="5" step="0.01" v-model.number="bt.slippagePct"></label>
+            <label class="field"><span>리스크 규칙</span>
+              <span class="row"><input type="checkbox" v-model="bt.useRisk"> <span class="small muted">현재 설정의 손절·익절·추적 손절·일일/연속 손실 한도 적용</span></span>
+            </label>
+          </div>
+          <div class="actions wrap">
+            <button class="primary" @click="runBacktest" :disabled="bt.submitting || btRunning || !btMarkets.length || !btPeriods.length">{{ btRunning ? '실행 중…' : '백테스트 실행 (' + (btPeriods.length * btMarkets.length) + '건)' }}</button>
+            <button v-if="btRunning" class="danger" @click="cancelBacktest">중단</button>
+            <select v-if="bt.jobs.length" v-model="bt.selectedJobId" @change="loadBacktestJob(bt.selectedJobId)">
+              <option value="">이전 결과 보기…</option>
+              <option v-for="j in bt.jobs" :key="j.id" :value="j.id">{{ fmtTime(j.created_at) }} · {{ j.label }} · {{ btStatusLabel(j.status) }}</option>
+            </select>
+          </div>
+          <div v-if="bt.job && btRunning" class="progress"><div class="bar" :style="{ width: btProgressPct + '%' }"></div><span>{{ bt.job.progress }} / {{ bt.job.total }} 완료</span></div>
+          <div v-if="bt.error" class="errors">{{ bt.error }}</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>결과 <span class="muted small" v-if="bt.job">{{ bt.job.label }} · 수수료 {{ (bt.job.request.fee_rate * 100).toFixed(3) }}% · 슬리피지 {{ (bt.job.request.slippage_rate * 100).toFixed(3) }}%{{ bt.job.request.use_risk ? ' · 리스크 적용' : '' }}</span></h3>
+        <div v-if="!bt.job" class="muted">아직 실행한 백테스트가 없습니다. 왼쪽에서 기간을 고르고 실행하세요.</div>
+        <template v-else>
+          <div class="muted small" v-if="btSummary">{{ btSummary }}</div>
+          <table class="bt">
+            <thead><tr><th>구간</th><th>마켓</th><th>전략</th><th>단순 보유</th><th>MDD</th><th>거래</th><th>승률</th><th>PF</th><th>수수료</th></tr></thead>
+            <tbody>
+              <tr v-if="!bt.job.results.length"><td colspan="9" class="muted">{{ btRunning ? '첫 구간을 계산하는 중…' : '결과 없음' }}</td></tr>
+              <tr v-for="(r, i) in bt.job.results" :key="i" :class="{ sel: bt.selected === i }" @click="selectBtResult(i)">
+                <td>{{ r.period }}</td><td>{{ r.market }}</td>
+                <template v-if="r.error"><td colspan="7" class="neg small">실패: {{ r.error }}</td></template>
+                <template v-else>
+                  <td :class="sign(r.metrics.total_return)">{{ pct(r.metrics.total_return) }}</td>
+                  <td :class="sign(r.benchmark.total_return)">{{ pct(r.benchmark.total_return) }}</td>
+                  <td class="neg">{{ pct(r.metrics.mdd) }}</td>
+                  <td>{{ r.metrics.total_trades }}</td><td>{{ r.metrics.total_trades ? pct(r.metrics.win_rate, 0) : '-' }}</td>
+                  <td>{{ r.metrics.profit_factor == null ? '-' : num(r.metrics.profit_factor, 2) }}</td>
+                  <td>{{ krw(r.metrics.total_fees) }}</td>
+                </template>
+              </tr>
+            </tbody>
+          </table>
+        </template>
+      </div>
+    </section>
+
+    <section class="card" v-if="btResult">
+      <h3>{{ btResult.period }} · {{ btResult.market }} · {{ btResult.interval }} <span class="muted small">{{ fmtTime(btResult.start) }} ~ {{ fmtTime(btResult.end) }} · 캔들 {{ btResult.candles }}개</span></h3>
+      <div class="kpis bt">
+        <div class="kpi"><span class="k">총 수익률</span><span class="v" :class="sign(btResult.metrics.total_return)">{{ pct(btResult.metrics.total_return) }}</span><span class="s">단순 보유 {{ pct(btResult.benchmark.total_return) }}</span></div>
+        <div class="kpi"><span class="k">최종 자산</span><span class="v">{{ krw(btResult.metrics.final_equity) }}</span><span class="s">초기 {{ krw(btResult.metrics.initial_capital) }}</span></div>
+        <div class="kpi"><span class="k">최대 낙폭</span><span class="v neg">{{ pct(btResult.metrics.mdd) }}</span><span class="s">단순 보유 {{ pct(btResult.benchmark.mdd) }}</span></div>
+        <div class="kpi"><span class="k">거래 · 승률</span><span class="v">{{ btResult.metrics.total_trades }}회 · {{ btResult.metrics.total_trades ? pct(btResult.metrics.win_rate, 0) : '-' }}</span><span class="s">연속 손실 최대 {{ btResult.metrics.max_consecutive_losses }}회</span></div>
+        <div class="kpi"><span class="k">손익비 (PF)</span><span class="v">{{ btResult.metrics.profit_factor == null ? '-' : num(btResult.metrics.profit_factor, 2) }}</span><span class="s">거래당 기대값 {{ krw(btResult.metrics.expectancy) }}</span></div>
+        <div class="kpi"><span class="k">수수료 합계</span><span class="v">{{ krw(btResult.metrics.total_fees) }}</span><span class="s">Sharpe {{ num(btResult.metrics.sharpe, 2) }} · 연환산 {{ pct(btResult.metrics.cagr) }}</span></div>
+      </div>
+      <canvas id="btChart" height="110"></canvas>
+      <div class="muted small mt">
+        <span v-for="(n, k) in btResult.exit_reasons" :key="k">청산 {{ reasonLabel(k) }} {{ n }}회 &nbsp;</span>
+        <span v-if="btResult.ignored_buy_signals">· 무시된 매수 신호 {{ btResult.ignored_buy_signals }}</span>
+        <span v-if="Object.keys(btResult.risk_rejections || {}).length">· 리스크 거부 {{ Object.values(btResult.risk_rejections).reduce((a, b) => a + b, 0) }}회</span>
+      </div>
+      <h3 class="mt">거래 내역 <span class="muted small">최근 {{ btResult.trades.length }}건 / 전체 {{ btResult.trade_count }}건</span></h3>
+      <table>
+        <thead><tr><th>진입</th><th>청산</th><th>진입가</th><th>청산가</th><th>손익</th><th>수수료</th><th>사유</th></tr></thead>
+        <tbody>
+          <tr v-if="!btResult.trades.length"><td colspan="7" class="muted">거래 없음</td></tr>
+          <tr v-for="t in btResult.trades.slice().reverse()" :key="t.entry_time + t.exit_time">
+            <td>{{ fmtTime(t.entry_time) }}</td><td>{{ fmtTime(t.exit_time) }}</td><td>{{ krw(t.entry_price) }}</td><td>{{ krw(t.exit_price) }}</td>
+            <td :class="sign(t.pnl)">{{ krw(t.pnl) }} ({{ pct(t.pnl_pct) }})</td><td>{{ krw(t.entry_fee + t.exit_fee) }}</td><td class="muted small">{{ reasonLabel(t.exit_reason) }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div class="muted small mt" v-if="btResult.saved_to">저장 위치: {{ btResult.saved_to }}</div>
+    </section>
+  </main>
+
   <!-- ===================== 제어 ===================== -->
   <main v-show="tab === 'control'" class="page">
     <section class="grid two">

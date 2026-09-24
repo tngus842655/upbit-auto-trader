@@ -98,3 +98,13 @@ table.markets tr.sel td { background: rgba(79, 140, 255, 0.12); }
 table.markets td:nth-child(3), table.markets td:nth-child(4), table.markets td:nth-child(5) { white-space: nowrap; }
 table.markets td:last-child { min-width: 90px; }
 table.markets td:last-child .pill { white-space: nowrap; margin: 1px 2px 1px 0; }
+
+/* ---------- 백테스트 탭 ---------- */
+.progress { position: relative; height: 22px; background: var(--panel2); border-radius: 6px; overflow: hidden; margin-top: 8px; }
+.progress .bar { position: absolute; top: 0; bottom: 0; left: 0; background: var(--accent); opacity: 0.55; transition: width 0.4s; }
+.progress span { position: relative; display: block; text-align: center; font-size: 12px; line-height: 22px; }
+table.bt tr { cursor: pointer; }
+table.bt tr.sel td { background: rgba(79, 140, 255, 0.12); }
+.kpis.bt { margin-bottom: 10px; }
+label.inline { display: inline-flex; align-items: center; gap: 4px; }
+.note.small { font-size: 12px; }
