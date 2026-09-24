@@ -1,0 +1,9 @@
+# 런타임 의존성 (Phase 1~5). 이후 Phase에서 fastapi 등이 추가된다.
+httpx>=0.28,<1.0
+PyJWT>=2.10,<3.0
+pydantic>=2.11,<3.0
+pydantic-settings>=2.10,<3.0
+websockets>=15,<17
+SQLAlchemy>=2.0,<3.0
+pandas>=2.2,<3.0
+numpy>=2.0,<3.0

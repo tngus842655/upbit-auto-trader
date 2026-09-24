@@ -1,0 +1,44 @@
+[project]
+name = "upbit-auto-trader"
+version = "0.1.0"
+description = "업비트 Open API 기반 개인용 코인 자동매매 시스템"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28,<1.0",
+    "PyJWT>=2.10,<3.0",
+    "pydantic>=2.11,<3.0",
+    "pydantic-settings>=2.10,<3.0",
+    "websockets>=15,<17",
+    "SQLAlchemy>=2.0,<3.0",
+    "pandas>=2.2,<3.0",
+    "numpy>=2.0,<3.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=1.0",
+    "ruff>=0.12",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-q"
+filterwarnings = [
+    "error::RuntimeWarning",
+    # 테스트용 짧은 Secret Key 를 jwt.decode 로 검증할 때 나는 PyJWT 키 길이 경고 (앱 코드는 auth.py 에서 자체 억제)
+    "ignore::jwt.warnings.InsecureKeyLengthWarning",
+]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["."]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "ASYNC"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]

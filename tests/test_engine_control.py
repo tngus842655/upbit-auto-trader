@@ -1,0 +1,127 @@
+"""엔진 제어 이음새 테스트 — 일시정지, 명령 큐, 하트비트, LIVE 모드 안전장치."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+
+import pytest
+
+from app.core.exceptions import ConfigError
+from app.database import Database, Repository
+from app.risk import RiskManager
+from app.trading.engine import TradingEngine
+from app.trading.live_broker import LiveBroker
+from app.trading.orders import PaperBroker
+from app.trading.portfolio import Portfolio
+from tests.test_engine import MARKET, T0, FakeClient, Harness, TimedStrategy
+
+
+async def test_pause_blocks_new_entries_but_allows_exits(make_settings) -> None:
+    buy_t, sell_t = T0 + timedelta(hours=10), T0 + timedelta(hours=11)
+    h = Harness(make_settings, actions={buy_t: "BUY", sell_t: "SELL"})
+    await h.engine.warmup()
+    h.now = T0 + timedelta(hours=11, seconds=5)
+    h.feed_prices(ask=110.0, bid=109.0)
+
+    h.repo.enqueue_command("pause")
+    assert h.engine.poll_commands() == ["pause"]
+    assert h.engine.paused is True
+    await h.engine.process_closed_candles(h.now)
+    assert not h.portfolio.has_position(MARKET)  # 매수 신호 무시
+    assert any(entry.event == "paused_skip" for entry in h.repo.recent_logs(10))
+    assert h.repo.pending_commands() == []
+
+    h.repo.enqueue_command("resume")
+    assert h.engine.poll_commands() == ["resume"] and h.engine.paused is False
+    # 일시정지 중에도 청산은 동작: 포지션을 만들고 pause 후 SELL 신호
+    h.portfolio.buy(MARKET, 100.0, time=h.now, amount=100_000)
+    h.repo.enqueue_command("pause")
+    h.engine.poll_commands()
+    h.add_candle(12, 111.0)
+    h.now = T0 + timedelta(hours=12, seconds=5)
+    h.feed_prices(ask=110.0, bid=109.0)
+    await h.engine.process_closed_candles(h.now)
+    assert not h.portfolio.has_position(MARKET)
+    assert h.engine.stats.commands_processed == 3
+
+
+async def test_stop_halt_and_unknown_commands(make_settings) -> None:
+    h = Harness(make_settings)
+    h.repo.enqueue_command("halt", {"reason": "테스트"})
+    h.repo.enqueue_command("bogus")
+    h.repo.enqueue_command("stop")
+    handled = h.engine.poll_commands()
+    assert handled == ["halt", "bogus", "stop"]
+    assert h.engine.risk.state.halted and h.engine.paused
+    assert h.engine._stop.is_set()
+    results = {c.event: c.message for c in h.repo.recent_logs(10) if c.event == "command"}
+    assert "알 수 없는 명령" in results["command"] or any("알 수 없는" in e.message for e in h.repo.recent_logs(10))
+    h.repo.enqueue_command("resume_risk")
+    h.engine.poll_commands()
+    assert h.engine.risk.state.halted is False
+
+
+async def test_heartbeat_written_and_updated(make_settings) -> None:
+    h = Harness(make_settings)
+    h.engine.status = "running"
+    h.engine.write_heartbeat()
+    status = h.repo.read_engine_status()
+    assert status is not None and status.status == "RUNNING" and status.mode == "paper"
+    assert status.strategy == "timed" and status.markets == [MARKET] and status.interval == "60m"
+    assert status.ws_status == "NOT_USED" and status.pid
+    h.engine.paused = True
+    h.engine.write_heartbeat()
+    assert h.repo.read_engine_status().status == "PAUSED"
+    h.engine.write_heartbeat("STOPPED")
+    assert h.repo.read_engine_status().status == "STOPPED"
+    assert h.engine.stats.heartbeats == 3
+
+
+async def test_run_loop_processes_commands_and_heartbeats(make_settings) -> None:
+    h = Harness(make_settings)
+    h.engine.clock = lambda: datetime.now(UTC)
+    h.engine.command_poll_interval = 0.05
+    h.client.candles = [
+        __import__("tests.test_strategy_data", fromlist=["make_candle"]).make_candle(
+            datetime.now(UTC).replace(minute=0, second=0, microsecond=0) - timedelta(hours=i), 100.0
+        )
+        for i in range(1, 12)
+    ]
+    h.repo.enqueue_command("stop")  # 루프가 첫 폴링에서 정지
+    stats = await h.engine.run(duration_seconds=5)
+    assert stats.commands_processed == 1 and h.engine.status == "stopped"
+    assert h.repo.read_engine_status().status == "STOPPED"
+    assert h.repo.pending_commands() == []
+
+
+def test_live_mode_requires_flags_keys_and_live_broker(make_settings) -> None:
+    portfolio = Portfolio(100_000)
+    client = FakeClient([])
+    strategy = TimedStrategy({})
+    db = Database("sqlite://")
+    db.create_all()
+    paper_repo = Repository(db, "paper")
+    live_repo = Repository(db, "live")
+
+    with pytest.raises(ConfigError, match="LIVE_TRADING_ENABLED"):
+        TradingEngine(make_settings(trading_mode="LIVE"), strategy=strategy, portfolio=portfolio,
+                      broker=PaperBroker(portfolio), risk=RiskManager(), repo=paper_repo, client=client)
+    armed = make_settings(
+        trading_mode="LIVE", live_trading_enabled=True, upbit_access_key="a" * 20, upbit_secret_key="b" * 40
+    )
+    with pytest.raises(ConfigError, match="LiveBroker"):
+        TradingEngine(armed, strategy=strategy, portfolio=portfolio, broker=PaperBroker(portfolio),
+                      risk=RiskManager(), repo=live_repo, client=client)
+    no_keys = make_settings(trading_mode="LIVE", live_trading_enabled=True)
+    with pytest.raises(ConfigError, match="KEY"):
+        TradingEngine(no_keys, strategy=strategy, portfolio=portfolio, broker=LiveBroker(client, portfolio, no_keys),
+                      risk=RiskManager(), repo=live_repo, client=client)
+    with pytest.raises(ConfigError, match="모드"):
+        TradingEngine(armed, strategy=strategy, portfolio=portfolio, broker=LiveBroker(client, portfolio, armed),
+                      risk=RiskManager(), repo=paper_repo, client=client)
+    engine = TradingEngine(armed, strategy=strategy, portfolio=portfolio, broker=LiveBroker(client, portfolio, armed),
+                           risk=RiskManager(), repo=live_repo, client=client)
+    assert engine.mode == "live"
+    with pytest.raises(ConfigError, match="PaperBroker"):
+        TradingEngine(make_settings(), strategy=strategy, portfolio=portfolio,
+                      broker=LiveBroker(client, portfolio, armed), risk=RiskManager(), repo=paper_repo, client=client)
