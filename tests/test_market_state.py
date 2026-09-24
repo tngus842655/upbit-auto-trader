@@ -55,8 +55,13 @@ class TestPrices:
         assert state.update_price(parse_ws_message(json.dumps(TICKER_JSON))) is True
         p = state.price("KRW-BTC")
         assert p.last_price == TICKER_JSON["trade_price"] and p.best_bid is None
+        # 고정 데이터의 호가는 현재가보다 18분 전 → 오래된 호가는 평가에 쓰지 않는다 (감사 CRITICAL-2)
         assert state.update_price(parse_ws_message(json.dumps(ORDERBOOK_JSON))) is True
         assert (p.best_ask, p.best_bid) == (109950000.0, 109880000.0)
+        assert p.book_usable is False and p.mark_price == TICKER_JSON["trade_price"]
+        # 현재가와 같은 시각의 호가면 중간값을 쓴다
+        aligned = {**ORDERBOOK_JSON, "timestamp": TICKER_JSON["timestamp"] + 500}
+        assert state.update_price(parse_ws_message(json.dumps(aligned))) is True
         assert p.mark_price == pytest.approx((109950000.0 + 109880000.0) / 2)
         assert state.update_price(parse_ws_message(json.dumps(TRADE_JSON))) is True
         assert p.last_price == TRADE_JSON["trade_price"] and p.best_ask == TRADE_JSON["best_ask_price"]

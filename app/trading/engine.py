@@ -141,7 +141,7 @@ class TradingEngine:
         self.client = client
         self.markets = list(markets or settings.markets)
         self.interval = CandleInterval.parse(interval or settings.candle_interval)
-        self.state = MarketState(self.interval)
+        self.state = MarketState(self.interval, price_max_age_seconds=settings.price_max_age_seconds)
         self.ws_factory = ws_factory
         self.clock = clock
         self.sleep = sleep

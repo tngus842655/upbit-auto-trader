@@ -26,15 +26,29 @@ class PriceState:
     best_bid: float | None = None
     best_ask: float | None = None
     book_time: datetime | None = None
+    # 호가가 최신 체결가(또는 REST 보정) 시각보다 이만큼 넘게 오래됐으면 평가에 쓰지 않는다 (감사 CRITICAL-2)
+    book_max_age_seconds: float = 30.0
 
     def is_fresh(self, now: datetime, max_age_seconds: float) -> bool:
         latest = max((t for t in (self.last_time, self.book_time) if t is not None), default=None)
         return latest is not None and (now - latest).total_seconds() <= max_age_seconds
 
     @property
+    def book_usable(self) -> bool:
+        """호가를 평가에 써도 되는지 — 호가가 있고, 최신 체결가보다 ``book_max_age_seconds`` 넘게 뒤처지지 않았을 때.
+
+        WebSocket 이 끊겨 호가는 몇 시간 전인데 REST 보정 체결가는 방금이면 호가를 버린다.
+        """
+        if not (self.best_bid and self.best_ask):
+            return False
+        if self.book_time is None or self.last_time is None:
+            return True
+        return (self.last_time - self.book_time).total_seconds() <= self.book_max_age_seconds
+
+    @property
     def mark_price(self) -> float | None:
-        """평가용 가격: 호가 중간값 → 마지막 체결가 순."""
-        if self.best_bid and self.best_ask:
+        """평가용 가격: 최신 호가 중간값 → 마지막 체결가 순. 호가가 오래됐으면 체결가."""
+        if self.book_usable:
             return (self.best_bid + self.best_ask) / 2
         return self.last_price
 
@@ -43,6 +57,7 @@ class PriceState:
 class MarketState:
     interval: CandleInterval
     max_rows: int = 1000
+    price_max_age_seconds: float = 30.0  # PriceState.book_max_age_seconds 로 전달
     candles: dict[str, pd.DataFrame] = field(default_factory=dict)
     prices: dict[str, PriceState] = field(default_factory=dict)
 
@@ -83,7 +98,7 @@ class MarketState:
     def _state(self, market: str) -> PriceState:
         state = self.prices.get(market)
         if state is None:
-            state = PriceState(market)
+            state = PriceState(market, book_max_age_seconds=self.price_max_age_seconds)
             self.prices[market] = state
         return state
 
@@ -113,7 +128,7 @@ class MarketState:
         return False
 
     def set_last_price(self, market: str, price: float, time: datetime) -> None:
-        """REST 현재가로 보정할 때 사용."""
+        """REST 현재가로 보정할 때 사용. 보정 시각보다 오래된 호가는 ``mark_price`` 에서 자동으로 무시된다."""
         state = self._state(market)
         state.last_price = price
         state.last_time = time
