@@ -30,8 +30,8 @@ from app.database.models import (
     to_db_time,
 )
 from app.strategy.base import Signal
-from app.trading.orders import Order
-from app.trading.portfolio import Fill, Portfolio, Position, Trade
+from app.trading.orders import Order, OrderStatus, OrderType
+from app.trading.portfolio import Fill, Portfolio, Position, Side, Trade
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +69,7 @@ class Repository:
                     strategy=order.strategy, signal_time=to_db_time(order.signal_time),
                     created_at=to_db_time(order.created_at), filled_at=to_db_time(order.filled_at),
                     error=order.error, exchange_order_id=order.exchange_order_id,
+                    exchange_identifier=order.exchange_identifier,
                 )
             )
 
@@ -206,6 +207,24 @@ class Repository:
             if market:
                 stmt = stmt.where(SignalRecord.market == market)
             return list(s.execute(stmt.order_by(SignalRecord.time.desc()).limit(limit)).scalars())
+
+    def load_unknown_orders(self) -> list[Order]:
+        """거래소 생성·체결 여부가 확정되지 않은(UNKNOWN) 주문 — 재시작 뒤 후속 확정용."""
+        with self.db.session() as s:
+            stmt = select(OrderRecord).where(
+                OrderRecord.mode == self.mode, OrderRecord.status == OrderStatus.UNKNOWN.value
+            )
+            rows = list(s.execute(stmt.order_by(OrderRecord.created_at)).scalars())
+        return [
+            Order(
+                id=r.id, client_id=r.client_id, mode=r.mode, market=r.market, side=Side(r.side),
+                order_type=OrderType(r.order_type), amount=r.amount, quantity=r.quantity,
+                status=OrderStatus(r.status), created_at=from_db_time(r.created_at), reason=r.reason or "",
+                strategy=r.strategy or "", signal_time=from_db_time(r.signal_time), error=r.error,
+                exchange_order_id=r.exchange_order_id, exchange_identifier=r.exchange_identifier,
+            )
+            for r in rows
+        ]
 
     def recent_orders(self, limit: int = 10) -> list[OrderRecord]:
         with self.db.session() as s:

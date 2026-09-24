@@ -23,6 +23,7 @@ PaperBroker 와 같은 ``execute(request, price, now) -> Order`` 인터페이스
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import uuid
@@ -165,12 +166,16 @@ class LiveBroker:
             return self._reject(order, last_error or "주문 생성 실패")
 
         order.exchange_order_id = info.uuid
+        order.status = OrderStatus.SUBMITTED
         self.processed.add(client_id)  # 거래소에 주문이 생긴 순간부터 같은 신호는 다시 내지 않는다
         try:
             final = await self._wait_for_fill(info)
         except UpbitError as exc:
-            order.status = OrderStatus.REJECTED
-            order.error = f"체결 확인 실패 (주문 uuid {info.uuid} 는 거래소에 남아 있을 수 있음): {exc}"
+            # 주문은 거래소에 있다. 체결 여부를 모르므로 REJECTED 로 축약하지 않고 UNKNOWN 으로 남겨
+            # 후속 확정한다 (감사 HIGH-1)
+            order.status = OrderStatus.UNKNOWN
+            order.error = f"체결 확인 실패 — 거래소 주문 uuid {info.uuid} 는 남아 있음, 후속 조회로 확정: {exc}"
+            log.error("주문 상태 미확인 %s %s: %s", order.market, order.side.value, order.error)
             return order
         return self._apply_fill(order, final, now)
 
@@ -253,7 +258,7 @@ class LiveBroker:
     def _apply_fill(self, order: Order, info: OrderInfo, now: datetime) -> Order:
         executed = float(info.executed_volume)
         if executed <= 0:
-            order.status = OrderStatus.REJECTED
+            order.status = OrderStatus.CANCELLED if info.state == "cancel" else OrderStatus.REJECTED
             order.error = f"체결 없음 (거래소 상태 {info.state}, uuid {info.uuid})"
             return order
         funds = float(info.executed_funds) if info.trades else 0.0
@@ -273,7 +278,7 @@ class LiveBroker:
             order.status = OrderStatus.REJECTED
             order.error = f"체결됐지만 내부 계좌 반영 실패: {exc} (거래소 uuid {info.uuid})"
             return order
-        order.status = OrderStatus.FILLED
+        order.status = OrderStatus.PARTIAL if info.state == "cancel" else OrderStatus.FILLED
         order.filled_at = now
         order.fill_price = fill.price
         order.filled_quantity = fill.quantity
@@ -283,6 +288,43 @@ class LiveBroker:
         if info.state == "cancel":
             order.reason += " (부분 체결 후 취소)"
         return order
+
+    async def resolve_order(self, order: Order, now: datetime | None = None) -> Order | None:
+        """UNKNOWN 주문의 후속 확정 — uuid(없으면 identifier)로 조회해 최종 상태면 체결을 반영한 Order 를 돌려준다.
+
+        - 아직 체결 대기면: fill_timeout 이 지났을 때 취소를 접수하고 None (다음 호출에서 확정).
+        - identifier 조회가 404 면 미생성 확정 → REJECTED. 조회 자체가 실패하면 None (UNKNOWN 유지).
+        """
+        now = now or datetime.now(UTC)
+        try:
+            if order.exchange_order_id:
+                info = await self.client.get_order(uuid=order.exchange_order_id)
+            elif order.exchange_identifier:
+                info = await self.client.get_order(identifier=order.exchange_identifier)
+            else:
+                return self._reject(order, "확정 불가: 거래소 uuid·identifier 없음")
+        except UpbitAPIError as exc:
+            if exc.status_code == 404 and not order.exchange_order_id:
+                return self._reject(
+                    order, f"네트워크 오류 뒤 주문 미생성 확인 (identifier {order.exchange_identifier})"
+                )
+            log.warning("주문 %s 확정 조회 실패: %s", order.id, exc)
+            return None
+        except UpbitError as exc:
+            log.warning("주문 %s 확정 조회 실패: %s", order.id, exc)
+            return None
+        order.exchange_order_id = info.uuid
+        if not info.is_final:
+            age = (now - order.created_at).total_seconds()
+            if age >= self.fill_timeout:
+                log.warning("주문 %s 가 %.0f초째 미체결 → 취소 접수", info.uuid, age)
+                with contextlib.suppress(UpbitError):
+                    await self.client.cancel_order(uuid=info.uuid)
+            return None
+        if not info.trades and info.executed_volume > 0:
+            with contextlib.suppress(UpbitError):
+                info = await self.client.get_order(uuid=info.uuid)
+        return self._apply_fill(order, info, now)
 
     @staticmethod
     def _reject(order: Order, error: str) -> Order:

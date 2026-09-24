@@ -79,6 +79,7 @@ class EngineStats:
     orders_filled: int = 0
     orders_rejected: int = 0
     orders_unknown: int = 0  # 거래소 생성 여부 미확인 (운영자 확인 필요)
+    orders_resolved: int = 0  # 미확정 주문을 후속 조회로 확정한 수
     risk_rejections: int = 0
     exits_triggered: int = 0
     risk_locks: int = 0
@@ -158,6 +159,14 @@ class TradingEngine:
         self.exit_check_interval = 1.0  # 초
         self.paused = False
         self.command_poll_interval = 2.0
+        # 미확정(UNKNOWN) 주문: 마켓별로 하나만 두고, 확정될 때까지 그 마켓의 신규 주문·청산을 막는다 (감사 HIGH-1)
+        self.pending_orders: dict[str, Order] = {}
+        self.pending_max_age = 600.0  # 이 시간 안에 확정 못 하면 거래소 잔고 동기화로 정리
+        # 청산 주문 실패 시 마켓별 백오프 (1초마다 재시도해 주문·로그·알림이 폭주하지 않게)
+        self._exit_backoff: dict[str, datetime] = {}
+        self._exit_failures: dict[str, int] = {}
+        self.exit_retry_base = 5.0
+        self.exit_retry_max = 300.0
         self.heartbeat_interval = 10.0
         self._last_command_poll: datetime | None = None
         self._reload_requested = False
@@ -263,6 +272,11 @@ class TradingEngine:
             log.info("일시정지 중 → 매수 신호 무시 %s", signal.market)
             self.repo.log("INFO", "paused_skip", f"{signal.market} BUY 신호 무시 (일시정지)")
             return
+        if signal.market in self.pending_orders:
+            log.warning("%s 미확정 주문이 있어 신호 %s 건너뜀", signal.market, signal.action.value)
+            self.repo.log("WARNING", "pending_order_skip",
+                          f"{signal.market} {signal.action.value}: 미확정 주문 대기 중")
+            return
         price = self.state.price(signal.market)
         decision = self.risk.evaluate(signal, self.portfolio, price, now, equity=self.current_equity())
         if not decision.approved:
@@ -358,6 +372,7 @@ class TradingEngine:
         elif order.status is OrderStatus.UNKNOWN:
             # 거래소에 주문이 있을 수 있는데 확인이 안 된 상태. 계좌는 건드리지 않고 기록·알림만 남긴다.
             self.stats.orders_unknown += 1
+            self.pending_orders[order.market] = order
             log.error("주문 상태 미확인 %s %s: %s", order.market, order.side.value, order.error)
             self.repo.log("ERROR", "order_unknown", f"{order.market} {order.side.value}: {order.error}",
                           order.to_dict())
@@ -371,6 +386,77 @@ class TradingEngine:
                           order.to_dict())
             self._notify(EventKind.ORDER_REJECTED, f"{order.market} {'매수' if order.side is Side.BUY else '매도'}",
                          str(order.error or "사유 없음"), {"order": order.to_dict()})
+
+    def _note_exit_result(self, market: str, order: Order, now: datetime) -> None:
+        """청산 주문 결과에 따라 마켓별 재시도 백오프를 갱신한다 (성공이면 초기화)."""
+        if order.is_filled:
+            self._exit_backoff.pop(market, None)
+            self._exit_failures.pop(market, None)
+            return
+        failures = self._exit_failures.get(market, 0) + 1
+        self._exit_failures[market] = failures
+        delay = min(self.exit_retry_base * (2 ** (failures - 1)), self.exit_retry_max)
+        self._exit_backoff[market] = now + timedelta(seconds=delay)
+        log.warning("%s 청산 주문 실패 %d회 → %.0f초 뒤 재시도", market, failures, delay)
+
+    # ------------------------------------------------------------------
+    # 미확정 주문 후속 확정
+    # ------------------------------------------------------------------
+    def load_pending_orders(self) -> int:
+        """DB 의 UNKNOWN 주문을 미확정 목록으로 복구한다 (재시작 대비)."""
+        count = 0
+        for order in self.repo.load_unknown_orders():
+            self.pending_orders.setdefault(order.market, order)
+            count += 1
+        if count:
+            log.warning("미확정 주문 %d건 복구 → 거래소 조회로 확정 예정", count)
+        return count
+
+    async def resolve_pending_orders(self, now: datetime | None = None) -> int:
+        """미확정(UNKNOWN) 주문을 거래소에서 다시 조회해 확정한다. 확정된 건수를 돌려준다."""
+        if not self.pending_orders:
+            return 0
+        now = now or self.clock()
+        resolver = getattr(self.broker, "resolve_order", None)
+        resolved = 0
+        for market, order in list(self.pending_orders.items()):
+            final: Order | None = None
+            if resolver is not None:
+                try:
+                    final = await resolver(order, now)
+                except Exception as exc:  # noqa: BLE001 - 확정 실패가 엔진을 멈추지 않게
+                    self.stats.errors += 1
+                    log.error("미확정 주문 %s 확정 실패: %s", order.id, exc)
+            if final is not None:
+                del self.pending_orders[market]
+                self.stats.orders_resolved += 1
+                resolved += 1
+                self.repo.log("INFO", "order_resolved", f"{market} {order.side.value} → {final.status.value}",
+                              final.to_dict())
+                self._record_order(final)
+                continue
+            if (now - order.created_at).total_seconds() >= self.pending_max_age:
+                await self._give_up_pending(market, order)
+        return resolved
+
+    async def _give_up_pending(self, market: str, order: Order) -> None:
+        """확정 시한을 넘긴 미확정 주문: 기록·알림을 남기고 거래소 잔고 기준으로 계좌를 맞춘다."""
+        del self.pending_orders[market]
+        order.error = f"{order.error or ''} | {self.pending_max_age:.0f}초 안에 확정 실패 → 거래소 잔고 동기화로 정리"
+        self.repo.save_order(order)
+        self.repo.log("ERROR", "order_unresolved", f"{market} {order.side.value}: 확정 실패, 잔고 동기화",
+                      order.to_dict())
+        self._notify(EventKind.API_ERROR, f"{market} 주문 확정 실패",
+                     "거래소 잔고 기준으로 계좌를 맞춥니다. 거래소에서 주문 내역을 확인하세요",
+                     key=f"unresolved:{market}")
+        if isinstance(self.broker, LiveBroker):
+            try:
+                diff = await self.broker.reconcile(self.markets)
+                self.repo.sync_portfolio(self.portfolio)
+                self.repo.log("INFO", "reconcile", "미확정 주문 정리 후 잔고 동기화", diff)
+            except Exception as exc:  # noqa: BLE001
+                self.stats.errors += 1
+                log.error("잔고 동기화 실패: %s", exc)
 
     # ------------------------------------------------------------------
     # 리스크: 청산 감시
@@ -399,6 +485,11 @@ class TradingEngine:
                 self._notify(EventKind.DAILY_LOSS_LIMIT, "당일 신규 진입 잠금", lock, self.risk.snapshot()["state"])
         orders: list[Order] = []
         for market, pos in list(self.portfolio.positions.items()):
+            if market in self.pending_orders:
+                continue  # 미확정 주문 확정 전에는 같은 마켓에 청산 주문을 겹쳐 내지 않는다
+            retry_at = self._exit_backoff.get(market)
+            if retry_at is not None and now < retry_at:
+                continue
             price = self.state.price(market)
             if price is None or not price.is_fresh(now, self.settings.price_max_age_seconds) or not price.mark_price:
                 continue
@@ -421,6 +512,7 @@ class TradingEngine:
             )
             order = await self.broker.execute(request, price, now)
             self._record_order(order)
+            self._note_exit_result(market, order, now)
             orders.append(order)
         return orders
 
@@ -622,6 +714,8 @@ class TradingEngine:
             log.info("거래소 잔고 동기화: %s", diff)
             self.repo.log("INFO", "reconcile", "거래소 잔고와 내부 계좌 동기화", diff)
             self.repo.sync_portfolio(self.portfolio)
+        self.load_pending_orders()
+        await self.resolve_pending_orders(self.clock())
         await self.ensure_prices()
         equity = self.snapshot()
         self.rebuild_risk_state(self.clock(), equity)
@@ -655,6 +749,8 @@ class TradingEngine:
                     except TraderError as exc:
                         self.stats.errors += 1
                         log.error("설정 다시 읽기 실패: %s", exc)
+                if self.pending_orders:
+                    await self.resolve_pending_orders(now)
                 heartbeat_due = self._last_heartbeat is None or (
                     (now - self._last_heartbeat).total_seconds() >= self.heartbeat_interval
                 )
@@ -713,6 +809,7 @@ class TradingEngine:
             "candle_checks": s.candle_checks, "closed_candles": s.closed_candles, "signals": s.signals,
             "actionable_signals": s.actionable_signals, "orders_filled": s.orders_filled,
             "orders_rejected": s.orders_rejected, "orders_unknown": s.orders_unknown,
+            "orders_resolved": s.orders_resolved,
             "risk_rejections": s.risk_rejections,
             "snapshots": s.snapshots, "price_updates": s.price_updates, "errors": s.errors,
             "exits_triggered": s.exits_triggered, "risk_locks": s.risk_locks, "last_equity": s.last_equity,

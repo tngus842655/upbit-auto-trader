@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -10,7 +10,7 @@ import pytest
 from app.core.exceptions import LiveTradingDisabledError, UpbitAPIError, UpbitNetworkError
 from app.exchange.models import Account, OrderChance, OrderInfo
 from app.trading.live_broker import LiveBroker, make_identifier, portfolio_from_accounts
-from app.trading.orders import OrderRequest, OrderStatus
+from app.trading.orders import Order, OrderRequest, OrderStatus, OrderType
 from app.trading.portfolio import Portfolio, Side
 
 NOW = datetime(2026, 5, 1, 3, 0, tzinfo=UTC)
@@ -300,7 +300,8 @@ class TestBuy:
                             poll_interval=1.0, fill_timeout=2.0)
         order = await broker.execute(OrderRequest(M, Side.BUY, amount=10_000, client_id="c8"), None, NOW)
         assert client.cancelled == ["u4"]
-        assert order.status is OrderStatus.REJECTED and "체결 없음" in order.error
+        # 체결 없이 취소 → CANCELLED (HIGH-1)
+        assert order.status is OrderStatus.CANCELLED and "체결 없음" in order.error
 
 
 class TestSell:
@@ -327,6 +328,74 @@ class TestSell:
         broker = LiveBroker(client, portfolio, armed_settings(make_settings), sleep=no_sleep)
         order = await broker.execute(OrderRequest(M, Side.SELL, client_id="s2"), None, NOW)
         assert order.status is OrderStatus.REJECTED and "수량이 없습니다" in order.error
+
+
+def unknown_order(uuid: str | None, identifier: str | None = None, *, created_at: datetime = NOW) -> Order:
+    return Order(
+        id=f"o-{uuid or identifier}", client_id=f"c-{uuid or identifier}", mode="live", market=M, side=Side.BUY,
+        order_type=OrderType.MARKET, amount=100_000, quantity=None, status=OrderStatus.UNKNOWN, created_at=created_at,
+        exchange_order_id=uuid, exchange_identifier=identifier,
+    )
+
+
+class TestUnknownAndResolve:
+    """감사 HIGH-1: 체결 확인 실패는 UNKNOWN 으로 남기고 후속 조회로 확정한다."""
+
+    async def test_poll_failure_marks_unknown_with_uuid(self, make_settings) -> None:
+        class PollFails(FakeClient):
+            async def get_order(self, *, uuid=None, identifier=None):
+                raise UpbitNetworkError("GET /v1/order 타임아웃")
+
+        client = PollFails(create_results=[order_info("u1", side="bid", state="wait")])
+        portfolio = Portfolio(1_000_000)
+        broker = LiveBroker(client, portfolio, armed_settings(make_settings), sleep=no_sleep)
+        order = await broker.execute(OrderRequest(M, Side.BUY, amount=100_000, client_id="c1"), None, NOW)
+        assert order.status is OrderStatus.UNKNOWN and order.exchange_order_id == "u1"
+        assert len(client.created) == 1 and portfolio.cash == 1_000_000 and "c1" in broker.processed
+
+    async def test_resolve_applies_fill_when_done(self, make_settings) -> None:
+        done = order_info("u1", side="bid", state="done", executed="0.001", fee="50",
+                          trades=[trade("100000000", "0.001")])
+        portfolio = Portfolio(1_000_000)
+        broker = LiveBroker(FakeClient(order_states=[done]), portfolio, armed_settings(make_settings), sleep=no_sleep)
+        order = unknown_order("u1")
+        final = await broker.resolve_order(order, NOW)
+        assert final is order and final.status is OrderStatus.FILLED and final.is_filled
+        assert portfolio.position(M).quantity == pytest.approx(0.001)
+        assert portfolio.cash == pytest.approx(1_000_000 - 100_000 - 50)
+
+    async def test_resolve_partial_cancelled_pending_and_failures(self, make_settings) -> None:
+        settings = armed_settings(make_settings)
+        # 부분 체결 후 취소 → PARTIAL (체결분 반영, is_filled)
+        partial = order_info("u2", side="bid", state="cancel", executed="0.0005", fee="25",
+                             trades=[trade("100000000", "0.0005")])
+        portfolio = Portfolio(1_000_000)
+        broker = LiveBroker(FakeClient(order_states=[partial]), portfolio, settings, sleep=no_sleep)
+        final = await broker.resolve_order(unknown_order("u2"), NOW)
+        assert final.status is OrderStatus.PARTIAL and final.is_filled and "부분 체결" in final.reason
+        assert portfolio.position(M).quantity == pytest.approx(0.0005)
+        # 체결 없이 취소 → CANCELLED
+        cancelled = order_info("u3", side="bid", state="cancel")
+        broker3 = LiveBroker(FakeClient(order_states=[cancelled]), Portfolio(1_000_000), settings, sleep=no_sleep)
+        assert (await broker3.resolve_order(unknown_order("u3"), NOW)).status is OrderStatus.CANCELLED
+        # 아직 대기 + fill_timeout 경과 → 취소 접수하고 None (다음 호출에서 확정)
+        waiting = order_info("u4", side="bid", state="wait")
+        client4 = FakeClient(order_states=[waiting])
+        broker4 = LiveBroker(client4, Portfolio(1_000_000), settings, sleep=no_sleep, fill_timeout=30)
+        stale = unknown_order("u4", created_at=NOW - timedelta(seconds=60))
+        assert await broker4.resolve_order(stale, NOW) is None and client4.cancelled == ["u4"]
+        # 조회 자체가 실패 → None (UNKNOWN 유지)
+
+        class Down(FakeClient):
+            async def get_order(self, *, uuid=None, identifier=None):
+                raise UpbitNetworkError("down")
+
+        broker5 = LiveBroker(Down(), Portfolio(1_000_000), settings, sleep=no_sleep)
+        assert await broker5.resolve_order(unknown_order("u5"), NOW) is None
+        # uuid 없이 identifier 만 있고 404 → 미생성 확정 REJECTED
+        broker6 = LiveBroker(FakeClient(order_states=[]), Portfolio(1_000_000), settings, sleep=no_sleep)
+        final6 = await broker6.resolve_order(unknown_order(None, "c6"), NOW)
+        assert final6.status is OrderStatus.REJECTED and "미생성" in final6.error
 
 
 async def test_reconcile_aligns_internal_portfolio_to_exchange(make_settings) -> None:

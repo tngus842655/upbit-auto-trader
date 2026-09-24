@@ -123,6 +123,127 @@ async def test_unknown_order_is_recorded_without_touching_portfolio(make_setting
     assert h.engine.stats_dict()["orders_unknown"] == 1
 
 
+class ResolvingPaperBroker(PaperBroker):
+    """resolve_order 를 가진 가짜 브로커 — 확정 결과를 큐로 스크립트한다."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.resolutions: list[str] = []  # 'fill' | 'none'
+        self.resolve_calls = 0
+
+    async def resolve_order(self, order, now):
+        self.resolve_calls += 1
+        action = self.resolutions.pop(0) if self.resolutions else "none"
+        if action != "fill":
+            return None
+        fill = self.portfolio.buy(order.market, 110.0, time=now, amount=order.amount, reason="resolved",
+                                  enforce_limits=False)
+        from app.trading.orders import OrderStatus
+
+        order.status = OrderStatus.FILLED
+        order.filled_at = now
+        order.fill_price = fill.price
+        order.filled_quantity = fill.quantity
+        order.fee = fill.fee
+        order.fills.append(fill)
+        return order
+
+
+def make_unknown(h: Harness, **overrides):
+    from app.trading.orders import Order, OrderStatus, OrderType
+    from app.trading.portfolio import Side
+
+    base = dict(
+        id="o-unknown", client_id="paper:KRW-BTC:BUY:u", mode="paper", market=MARKET, side=Side.BUY,
+        order_type=OrderType.MARKET, amount=100_000, quantity=None, status=OrderStatus.UNKNOWN, created_at=h.now,
+        error="체결 확인 실패", exchange_order_id="u1",
+    )
+    base.update(overrides)
+    return Order(**base)
+
+
+async def test_pending_unknown_order_blocks_market_until_resolved(make_settings) -> None:
+    """감사 HIGH-1: 미확정 주문이 있는 마켓은 신규 주문·청산을 막고, 확정되면 계좌에 반영한다."""
+    h = Harness(make_settings, actions={T0 + timedelta(hours=10): "BUY"})
+    broker = ResolvingPaperBroker(h.portfolio, slippage_rate=0.001)
+    h.engine.broker = broker
+    h.engine.pending_max_age = 24 * 3600  # 이 테스트는 시계를 1시간 넘게 돌리므로 포기 시한을 늘린다
+    await h.engine.warmup()
+    h.engine._record_order(make_unknown(h))
+    assert MARKET in h.engine.pending_orders and h.engine.stats.orders_unknown == 1
+    h.now = T0 + timedelta(hours=11, seconds=5)
+    h.feed_prices(ask=110.0, bid=109.0)
+    await h.engine.process_closed_candles(h.now)  # BUY 신호가 나오지만 미확정 주문 때문에 건너뛴다
+    assert not h.portfolio.has_position(MARKET)
+    assert any(e.event == "pending_order_skip" for e in h.repo.recent_logs(10))
+    # 아직 확정 안 됨 → 그대로 대기
+    assert await h.engine.resolve_pending_orders(h.now) == 0 and MARKET in h.engine.pending_orders
+    # 거래소에서 체결로 확정 → 계좌 반영, 대기 목록 제거, DB 상태 FILLED
+    broker.resolutions.append("fill")
+    assert await h.engine.resolve_pending_orders(h.now) == 1
+    assert MARKET not in h.engine.pending_orders and h.portfolio.has_position(MARKET)
+    assert h.repo.recent_orders(1)[0].status == "FILLED" and h.engine.stats.orders_resolved == 1
+    assert any(e.event == "order_resolved" for e in h.repo.recent_logs(10))
+
+
+async def test_pending_order_gives_up_after_max_age(make_settings) -> None:
+    h = Harness(make_settings)
+    h.engine.broker = ResolvingPaperBroker(h.portfolio, slippage_rate=0.001)
+    h.engine.pending_max_age = 100
+    h.engine._record_order(make_unknown(h))
+    assert await h.engine.resolve_pending_orders(h.now + timedelta(seconds=50)) == 0
+    assert MARKET in h.engine.pending_orders
+    assert await h.engine.resolve_pending_orders(h.now + timedelta(seconds=101)) == 0
+    assert MARKET not in h.engine.pending_orders
+    assert any(e.event == "order_unresolved" for e in h.repo.recent_logs(10))
+    assert "확정 실패" in h.repo.recent_orders(1)[0].error
+
+
+async def test_load_pending_orders_from_db(make_settings) -> None:
+    h = Harness(make_settings)
+    h.repo.save_order(make_unknown(h, exchange_order_id=None, exchange_identifier="c9"))
+    assert h.engine.load_pending_orders() == 1
+    assert h.engine.pending_orders[MARKET].exchange_identifier == "c9"
+    assert h.engine.load_pending_orders() == 1 and len(h.engine.pending_orders) == 1  # 중복 적재 없음
+
+
+async def test_exit_retry_backoff_prevents_storm(make_settings) -> None:
+    """청산 주문이 거부되면 마켓별 백오프(5초→10초→…)로 1초마다 재시도하지 않는다."""
+    from app.trading.orders import Order, OrderStatus, OrderType
+
+    h = Harness(make_settings, actions={T0 + timedelta(hours=10): "BUY"})
+    await h.engine.warmup()
+    h.now = T0 + timedelta(hours=11, seconds=5)
+    h.feed_prices(ask=110.0, bid=109.0)
+    await h.engine.process_closed_candles(h.now)
+    assert h.portfolio.has_position(MARKET)
+
+    class RejectingBroker(PaperBroker):
+        calls = 0
+
+        async def execute(self, request, price, now):
+            RejectingBroker.calls += 1
+            return Order(
+                id=f"rej-{self.calls}", client_id=request.resolved_client_id(self.mode), mode="paper",
+                market=request.market, side=request.side, order_type=OrderType.MARKET, amount=None,
+                quantity=request.quantity, status=OrderStatus.REJECTED, created_at=now, error="거래소 거부",
+            )
+
+    h.engine.broker = RejectingBroker(h.portfolio, slippage_rate=0.001)
+    h.now += timedelta(seconds=2)
+    h.feed_prices(ask=103.0, bid=102.0)  # 손절선(-5%) 아래
+    await h.engine.check_exits(h.now, force=True)
+    assert RejectingBroker.calls == 1 and h.engine._exit_failures[MARKET] == 1
+    h.now += timedelta(seconds=2)
+    h.feed_prices(ask=103.0, bid=102.0)
+    await h.engine.check_exits(h.now, force=True)
+    assert RejectingBroker.calls == 1  # 5초 백오프 안 → 재시도 없음
+    h.now += timedelta(seconds=4)
+    h.feed_prices(ask=103.0, bid=102.0)
+    await h.engine.check_exits(h.now, force=True)
+    assert RejectingBroker.calls == 2 and h.engine._exit_failures[MARKET] == 2  # 다음 백오프 10초
+
+
 def test_live_mode_requires_flags_keys_and_live_broker(make_settings) -> None:
     portfolio = Portfolio(100_000)
     client = FakeClient([])

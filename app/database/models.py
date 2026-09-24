@@ -81,6 +81,8 @@ class OrderRecord(Base):
     filled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     exchange_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)  # Phase 7: 업비트 uuid
+    # 업비트 identifier — 미확정(UNKNOWN) 주문을 재시작 뒤 조회·복구할 때 사용
+    exchange_identifier: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class FillRecord(Base):

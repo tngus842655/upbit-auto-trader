@@ -22,7 +22,10 @@ from app.trading.portfolio import Fill, Portfolio, PortfolioError, Side
 
 class OrderStatus(StrEnum):
     NEW = "NEW"
+    SUBMITTED = "SUBMITTED"  # 거래소가 접수(uuid 발급), 체결 대기
     FILLED = "FILLED"
+    PARTIAL = "PARTIAL"  # 부분 체결 후 취소 — 체결분은 계좌에 반영됨
+    CANCELLED = "CANCELLED"  # 체결 없이 취소
     REJECTED = "REJECTED"
     UNKNOWN = "UNKNOWN"  # 거래소에 주문이 생겼을 수 있으나 확인하지 못함 (응답 유실 + 조회 실패) — 운영자 확인 필요
 
@@ -75,7 +78,8 @@ class Order:
 
     @property
     def is_filled(self) -> bool:
-        return self.status is OrderStatus.FILLED
+        """체결분이 계좌에 반영된 주문 (전량 또는 부분 체결)."""
+        return self.status in (OrderStatus.FILLED, OrderStatus.PARTIAL)
 
     def to_dict(self) -> dict[str, Any]:
         return {
