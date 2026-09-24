@@ -15,6 +15,7 @@ Phase 1 에서는 연결 점검용 명령만 제공한다. 실제 매매 루프(
     python -m app.main status [--mode live]                                   # 엔진 상태·계좌 조회
     python -m app.main control pause|resume|stop|halt|resume-risk             # 실행 중 엔진 제어 (Phase 7)
     python -m app.main order-test KRW-BTC --amount 5000                       # 주문 테스트 API (실제 주문 없음)
+    python -m app.main notify-test                                            # 알림 채널(Telegram/Discord) 테스트 발송
     python -m app.main run --confirm-live REAL-MONEY                          # LIVE (이중 플래그 + 확인 문구)
     python -m app.main serve                                                  # 대시보드 http://127.0.0.1:8000 (Phase 8)
 """
@@ -40,6 +41,7 @@ from app.exchange.models import KST, Account, Candle, CandleInterval, Ticker
 from app.exchange.upbit_client import UpbitClient
 from app.exchange.websocket import Subscription, UpbitWebSocket
 from app.exchange.ws_models import WsCandle, WsMessage, WsOrderbook, WsTicker, WsTrade
+from app.notify import EventKind, NotificationEvent, NotifyError, build_notification_manager, discover_chats, get_me
 from app.risk import RiskConfig, RiskManager
 from app.strategy import check_no_lookahead, create_strategy
 from app.strategy.data import candles_to_dataframe, detect_price_anomalies, drop_unclosed, validate_candles
@@ -375,11 +377,21 @@ async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
                 if args.duration:
                     stop_hint = f"  {args.duration:.0f}초 후 종료"
                 print(stop_hint)
+                notifier = build_notification_manager(
+                    settings,
+                    on_failure=lambda event, error: repo.log(
+                        "WARNING", "notify_failed", error, {"kind": event.kind.value, "title": event.title}
+                    ),
+                )
+                if notifier is not None:
+                    print(f"  알림: {", ".join(notifier.channels)} (이벤트 {len(notifier.enabled)}종)")
+                else:
+                    print("  알림: 없음 (NOTIFY_LOG=true 또는 TELEGRAM_* / DISCORD_WEBHOOK_URL 설정 시 발송)")
                 engine = TradingEngine(
                     settings, strategy=strategy, portfolio=portfolio, broker=broker, risk=risk, repo=repo,
                     client=client, markets=markets, interval=interval,
                     ws_factory=lambda subs: UpbitWebSocket(subs, url=settings.upbit_ws_url),
-                    runtime=runtime, settings_version=version,
+                    runtime=runtime, settings_version=version, notifier=notifier,
                 )
                 stats = await engine.run(duration_seconds=args.duration or None)
             finally:
@@ -509,6 +521,60 @@ async def cmd_status(settings: Settings, args: argparse.Namespace) -> int:
             print(f"  {_kst_str(entry.time)} [{entry.level}] {entry.event}: {entry.message}")
     finally:
         db.dispose()
+    return 0
+
+
+async def cmd_notify_test(settings: Settings, args: argparse.Namespace) -> int:
+    """설정된 알림 채널 전부에 테스트 메시지를 보낸다. 실패한 채널이 있으면 종료 코드 1."""
+    if args.discover_telegram:
+        return await _discover_telegram_chats(settings)
+    manager = build_notification_manager(settings, include_log=args.include_log or None)
+    if manager is None:
+        print("알림 채널이 없습니다. .env 의 TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 또는 DISCORD_WEBHOOK_URL 설정 필요")
+        return 2
+    event = NotificationEvent(
+        kind=EventKind.BOT_START, title="알림 테스트", message=args.message or "upbit-auto-trader 알림 채널 연결 확인",
+        mode=settings.trading_mode.value.lower(),
+    )
+    print(f"=== 알림 테스트: {", ".join(manager.channels)} ===")
+    try:
+        results = await manager.send_now(event)
+    finally:
+        await manager.close()
+    for channel, error in results.items():
+        print(f"  {channel:<9} {"OK" if error is None else "실패 — " + error}")
+    print(f"  보낼 이벤트: {", ".join(k.value for k in settings.notify_event_kinds()) or "없음(off)"}")
+    return 0 if all(error is None for error in results.values()) else 1
+
+
+async def _discover_telegram_chats(settings: Settings) -> int:
+    """TELEGRAM_BOT_TOKEN 만 있으면 봇이 본 채널·그룹·개인 대화의 chat id 를 찾아 준다."""
+    if settings.telegram_bot_token is None:
+        print("TELEGRAM_BOT_TOKEN 이 .env 에 없습니다. @BotFather 에서 봇을 만들고 토큰을 넣은 뒤 다시 실행하세요.")
+        return 2
+    token = settings.telegram_bot_token.get_secret_value()
+    try:
+        me = await get_me(token, timeout_seconds=settings.http_timeout_seconds)
+        print(f"토큰의 봇: @{me['username']} ({me['name']}) — 채널 관리자에 추가한 봇과 같은지 확인하세요")
+        chats = await discover_chats(token, timeout_seconds=settings.http_timeout_seconds)
+    except NotifyError as exc:
+        print(f"조회 실패: {exc}")
+        return 1
+    current = (settings.telegram_chat_id or "").strip()
+    if current and not current.lstrip("-").isdigit():
+        print(f"경고: 현재 TELEGRAM_CHAT_ID 는 숫자가 아닙니다({len(current)}자). "
+              "채널 ID 는 -100 으로 시작하는 숫자입니다")
+    if not chats:
+        print("봇이 본 대화가 없습니다. 채널이면 봇을 채널 '관리자' 로 추가하고 메시지를 하나 올린 뒤, "
+              "개인 대화면 봇에게 /start 를 보낸 뒤 다시 실행하세요.")
+        return 1
+    print("=== 봇이 본 대화 (TELEGRAM_CHAT_ID 에 넣을 값) ===")
+    for chat in chats:
+        kinds = {"channel": "채널", "supergroup": "그룹", "group": "그룹", "private": "개인"}
+        kind = kinds.get(chat["type"], chat["type"])
+        tail = f"  · 최근 메시지: {chat['last_text']}" if chat["last_text"] else ""
+        print(f"  {chat['id']:<16} {kind:<4} {chat['title']}{tail}")
+    print("원하는 대화의 숫자 ID 를 .env 의 TELEGRAM_CHAT_ID 에 넣고 `notify-test` 로 발송을 확인하세요.")
     return 0
 
 
@@ -657,6 +723,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_ot.add_argument("--amount", type=float, default=5000, help="매수 테스트 금액 KRW (기본 5000)")
     p_ot.add_argument("--volume", type=float, default=0.0001, help="매도 테스트 수량")
     p_ot.set_defaults(func=cmd_order_test)
+
+    p_nt = sub.add_parser("notify-test", help="알림 채널(Telegram / Discord) 에 테스트 메시지 발송")
+    p_nt.add_argument("--message", help="보낼 본문 (기본: 연결 확인 문구)")
+    p_nt.add_argument("--include-log", action="store_true", help="NOTIFY_LOG 설정과 무관하게 로그 채널도 포함")
+    p_nt.add_argument("--discover-telegram", action="store_true",
+                      help="봇 토큰만으로 채널·그룹 chat id 찾기 (TELEGRAM_CHAT_ID 설정용)")
+    p_nt.set_defaults(func=cmd_notify_test)
 
     p_serve = sub.add_parser("serve", help="대시보드 웹 서버 실행 (기본 http://127.0.0.1:8000)")
     p_serve.add_argument("--host", help="바인드 주소 (기본 DASHBOARD_HOST=127.0.0.1)")

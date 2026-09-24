@@ -21,6 +21,7 @@ from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 if TYPE_CHECKING:
+    from app.notify.base import EventKind
     from app.risk.config import RiskConfig
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -164,6 +165,15 @@ class Settings(BaseSettings):
     upbit_pocket_access_key: SecretStr | None = None
     upbit_pocket_secret_key: SecretStr | None = None
 
+    # ----- 알림 (Phase 9) -----
+    telegram_bot_token: SecretStr | None = None  # @BotFather 가 준 봇 토큰
+    telegram_chat_id: str | None = None  # 알림 받을 채팅 ID (개인·그룹)
+    discord_webhook_url: SecretStr | None = None  # Discord 채널 웹훅 URL
+    # all / off / 쉼표 목록 (buy, sell, order_filled, stop_loss, daily_loss_limit, api_error, bot_start, bot_stop ...)
+    notify_events: Annotated[list[str], NoDecode] = Field(default_factory=lambda: ["all"])
+    notify_error_cooldown_seconds: float = Field(default=300.0, ge=0, description="같은 API 오류 반복 알림 억제(초)")
+    notify_log: bool = True  # 알림 본문을 로그에도 남긴다 (채널이 없어도 동작 확인 가능)
+
     # ----- 저장소 / 로그 -----
     database_url: str = "sqlite:///./data/trader.db"
     log_level: str = "INFO"
@@ -176,6 +186,13 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # 검증
     # ------------------------------------------------------------------
+    @field_validator("notify_events", mode="before")
+    @classmethod
+    def _parse_notify_events(cls, value: Any) -> list[str]:
+        from app.notify.base import parse_event_kinds  # notify.base 는 설정을 모르므로 순환 import 없음
+
+        return [kind.value for kind in parse_event_kinds(value)]
+
     @field_validator("markets", mode="before")
     @classmethod
     def _parse_markets(cls, value: Any) -> list[str]:
@@ -208,6 +225,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "upbit_access_key", "upbit_secret_key", "upbit_pocket_access_key", "upbit_pocket_secret_key", "dashboard_token",
+        "telegram_bot_token", "telegram_chat_id", "discord_webhook_url",
         mode="before",
     )
     @classmethod
@@ -254,6 +272,23 @@ class Settings(BaseSettings):
     @property
     def has_pocket_keys(self) -> bool:
         return bool(self.upbit_pocket_access_key and self.upbit_pocket_secret_key)
+
+    @property
+    def notify_channels(self) -> list[str]:
+        """설정된 알림 채널 이름 (비밀값은 노출하지 않는다)."""
+        channels: list[str] = []
+        if self.telegram_bot_token and self.telegram_chat_id:
+            channels.append("telegram")
+        if self.discord_webhook_url:
+            channels.append("discord")
+        if self.notify_log:
+            channels.append("log")
+        return channels
+
+    def notify_event_kinds(self) -> list[EventKind]:
+        from app.notify.base import parse_event_kinds
+
+        return parse_event_kinds(self.notify_events)
 
     @property
     def is_live_trading_allowed(self) -> bool:
@@ -305,6 +340,8 @@ class Settings(BaseSettings):
             "live_trading_allowed": self.is_live_trading_allowed,
             "has_api_keys": self.has_api_keys,
             "upbit_access_key": mask_secret(access),
+            "notify_channels": self.notify_channels,
+            "notify_events": [k.value for k in self.notify_event_kinds()],
             "upbit_api_url": self.upbit_api_url,
             "upbit_ws_url": self.upbit_ws_url,
             "markets": list(self.markets),

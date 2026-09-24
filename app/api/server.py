@@ -28,6 +28,7 @@ from app.database.database import Database
 from app.database.models import from_db_time
 from app.exchange.models import KST, CandleInterval
 from app.exchange.upbit_client import UpbitClient
+from app.notify import EventKind, NotificationEvent, build_notification_manager
 from app.strategy import available_strategies
 from app.trading.live_guard import LIVE_CONFIRM_PHRASE
 from app.trading.runtime_settings import RuntimeSettings
@@ -236,6 +237,25 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
         return {"queued": True, "command": command, "id": cmd_id, "engine_alive": alive, "engine_state": state}
 
     # ------------------------------------------------------------------ 포켓
+    @app.post("/api/notify/test", dependencies=[Depends(require_auth)])
+    async def api_notify_test(payload: dict[str, Any] | None = Body(None)) -> dict[str, Any]:
+        """설정된 알림 채널 전부에 테스트 메시지를 즉시 보낸다 (큐를 거치지 않음)."""
+        manager = build_notification_manager(settings)
+        if manager is None:
+            raise HTTPException(
+                status_code=404,
+                detail="알림 채널이 없습니다. .env 의 TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID 또는 DISCORD_WEBHOOK_URL",
+            )
+        text = str((payload or {}).get("message") or "대시보드에서 보낸 테스트 알림입니다")
+        event = NotificationEvent(kind=EventKind.BOT_START, title="알림 테스트", message=text,
+                                  mode=settings.trading_mode.value.lower())
+        try:
+            results = await manager.send_now(event)
+        finally:
+            await manager.close()
+        service.repo("paper").log("INFO", "notify_test", "대시보드 알림 테스트", {"results": results})
+        return {"channels": manager.channels, "results": results, "ok": all(v is None for v in results.values())}
+
     @app.get("/api/pockets", dependencies=[Depends(require_auth)])
     async def api_pockets() -> dict[str, Any]:
         return await service.pockets()

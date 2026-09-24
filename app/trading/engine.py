@@ -33,14 +33,28 @@ from app.database.repository import Repository
 from app.exchange.models import KST, CandleInterval
 from app.exchange.upbit_client import UpbitClient
 from app.exchange.websocket import Subscription, UpbitWebSocket
+from app.notify.base import EventKind, NotificationEvent
+from app.notify.manager import NotificationManager
 from app.risk.base import RiskPolicy
 from app.risk.manager import RiskManager
 from app.strategy.base import Signal, Strategy
 from app.trading.live_broker import LiveBroker
 from app.trading.market_state import MarketState
 from app.trading.orders import Order, OrderRequest, PaperBroker
-from app.trading.portfolio import Portfolio, Side
+from app.trading.portfolio import Portfolio, Side, Trade
 from app.trading.runtime_settings import RuntimeSettings
+
+_EXIT_KINDS = (
+    ("stop_loss", EventKind.STOP_LOSS), ("take_profit", EventKind.TAKE_PROFIT), ("trailing", EventKind.TRAILING_STOP)
+)
+
+
+def _exit_kind(reason: str) -> EventKind:
+    """청산 사유 문자열 → 알림 종류 (손절/익절/추적 손절, 그 외는 매도)."""
+    for prefix, kind in _EXIT_KINDS:
+        if reason.startswith(prefix):
+            return kind
+    return EventKind.SELL
 
 log = logging.getLogger(__name__)
 
@@ -97,6 +111,7 @@ class TradingEngine:
         refresh_candles: int = 5,
         runtime: RuntimeSettings | None = None,
         settings_version: int = 0,
+        notifier: NotificationManager | None = None,
     ) -> None:
         if settings.trading_mode is TradingMode.PAPER:
             if not isinstance(broker, PaperBroker):
@@ -131,6 +146,8 @@ class TradingEngine:
         self.sleep = sleep
         self.warmup_candles = max(warmup_candles or settings.warmup_candles, strategy.warmup_periods + 5)
         self.refresh_candles = refresh_candles
+        self.notifier = notifier
+        self._stop_error: BaseException | None = None
         self.stats = EngineStats()
         self.status = "created"
         self._stop = asyncio.Event()
@@ -210,6 +227,7 @@ class TradingEngine:
                 self.stats.errors += 1
                 log.error("%s 캔들 조회 실패: %s", market, exc)
                 self.repo.log("ERROR", "candle_fetch_failed", f"{market}: {exc}")
+                self._notify(EventKind.API_ERROR, f"캔들 조회 실패 {market}", str(exc), key=f"candle:{market}")
                 continue
             new_times = self.state.merge_candles(market, candles, now)
             if not new_times:
@@ -257,8 +275,49 @@ class TradingEngine:
             market=signal.market, side=side, amount=decision.amount, quantity=decision.quantity,
             reason=signal.reason, strategy=signal.strategy, signal_time=signal.time,
         )
+        if side is Side.BUY:
+            self._notify(EventKind.BUY, signal.market,
+                         f"시장가 매수 {decision.amount or 0:,.0f}원 · 사유: {signal.reason}",
+                         {"signal": signal.to_dict(), "amount": decision.amount})
+        else:
+            self._notify(EventKind.SELL, signal.market,
+                         f"시장가 매도 {decision.quantity or 0:.8f}개 · 사유: {signal.reason}",
+                         {"signal": signal.to_dict(), "quantity": decision.quantity})
         order = await self.broker.execute(request, price, now)
         self._record_order(order)
+
+    def _notify(self, kind: EventKind, title: str, message: str = "", data: dict[str, Any] | None = None, *,
+                key: str | None = None) -> None:
+        """알림 이벤트를 큐에 넣는다. 알림 관리자가 없으면 아무 일도 하지 않는다 (매매를 막지 않음)."""
+        if self.notifier is None:
+            return
+        self.notifier.emit(NotificationEvent(kind=kind, title=title, message=message, mode=self.mode,
+                                             time=self.clock(), data=dict(data or {}), key=key))
+
+    def _fill_summary(self, order: Order, trades: Sequence[Trade]) -> str:
+        qty, price = order.filled_quantity or 0.0, order.fill_price or 0.0
+        text = f"{qty:.8f}개 @ {price:,.0f} · 금액 {qty * price:,.0f}원 · 수수료 {order.fee:,.0f}원"
+        for trade in trades:
+            pct = f" ({trade.pnl / trade.entry_amount * 100:+.2f}%)" if trade.entry_amount else ""
+            text += f" · 손익 {trade.pnl:+,.0f}원{pct} [{trade.exit_reason}]"
+        return text + f" · 현금 {self.portfolio.cash:,.0f}원"
+
+    def _stop_reason(self) -> str:
+        exc = self._stop_error
+        if exc is None:
+            return "정상 종료"
+        if isinstance(exc, KeyboardInterrupt):
+            return "사용자 중단 (Ctrl+C)"
+        if isinstance(exc, asyncio.CancelledError):
+            return "작업 취소"
+        return f"비정상 종료: {type(exc).__name__}: {exc}"[:300]
+
+    def _stop_summary(self) -> str:
+        realized = sum(t.pnl for t in self.portfolio.trades)
+        return (
+            f"체결 {self.stats.orders_filled}건 · 오류 {self.stats.errors}건 · 현금 {self.portfolio.cash:,.0f}원"
+            f" · 실현손익 {realized:+,.0f}원 · 수수료 {self.portfolio.fees_paid:,.0f}원"
+        )
 
     def _record_order(self, order: Order) -> None:
         if order.error and order.error.startswith("중복 주문"):
@@ -272,7 +331,8 @@ class TradingEngine:
             self.last_trade_at = order.filled_at or self.clock()
             for fill in order.fills:
                 self.repo.save_fill(fill, order_id=order.id, strategy=order.strategy)
-            for trade in self.portfolio.trades[self._round_trips_saved :]:
+            new_trades = self.portfolio.trades[self._round_trips_saved :]
+            for trade in new_trades:
                 self.repo.save_round_trip(trade)
             self._round_trips_saved = len(self.portfolio.trades)
             self.repo.sync_portfolio(self.portfolio)
@@ -282,6 +342,8 @@ class TradingEngine:
                     if lock:
                         self.stats.risk_locks += 1
                         self.repo.log("WARNING", "risk_lock", lock, self.risk.snapshot()["state"])
+                        self._notify(EventKind.CONSECUTIVE_LOSS_LIMIT, "당일 신규 진입 잠금", lock,
+                                     self.risk.snapshot()["state"])
             log.info(
                 "가상 체결 %s %s %.8f @ %.0f (수수료 %.0f) 현금 %.0f",
                 order.market, order.side.value, order.filled_quantity or 0, order.fill_price or 0, order.fee,
@@ -289,12 +351,16 @@ class TradingEngine:
             )
             self.repo.log("INFO", "order_filled", f"{order.market} {order.side.value} @ {order.fill_price:.0f}",
                           order.to_dict())
+            self._notify(EventKind.ORDER_FILLED, f"{order.market} {'매수' if order.side is Side.BUY else '매도'}",
+                         self._fill_summary(order, new_trades), {"order": order.to_dict()})
             self.snapshot(order.filled_at)
         else:
             self.stats.orders_rejected += 1
             log.warning("주문 거부 %s %s: %s", order.market, order.side.value, order.error)
             self.repo.log("WARNING", "order_rejected", f"{order.market} {order.side.value}: {order.error}",
                           order.to_dict())
+            self._notify(EventKind.ORDER_REJECTED, f"{order.market} {'매수' if order.side is Side.BUY else '매도'}",
+                         str(order.error or "사유 없음"), {"order": order.to_dict()})
 
     # ------------------------------------------------------------------
     # 리스크: 청산 감시
@@ -320,6 +386,7 @@ class TradingEngine:
             if lock:
                 self.stats.risk_locks += 1
                 self.repo.log("WARNING", "risk_lock", lock, self.risk.snapshot()["state"])
+                self._notify(EventKind.DAILY_LOSS_LIMIT, "당일 신규 진입 잠금", lock, self.risk.snapshot()["state"])
         orders: list[Order] = []
         for market, pos in list(self.portfolio.positions.items()):
             price = self.state.price(market)
@@ -331,6 +398,13 @@ class TradingEngine:
             self.stats.exits_triggered += 1
             log.info("청산 조건 %s %s: 기준가 %.0f, 현재 %.0f", market, exit_check.reason, exit_check.trigger_price,
                      price.mark_price)
+            change = (price.mark_price / pos.avg_price - 1) * 100 if pos.avg_price else 0.0
+            self._notify(
+                _exit_kind(exit_check.reason), market,
+                f"기준가 {exit_check.trigger_price:,.0f} · 현재 {price.mark_price:,.0f} ({change:+.2f}%)"
+                f" · {exit_check.reason}",
+                {"reason": exit_check.reason, "trigger_price": exit_check.trigger_price, "price": price.mark_price},
+            )
             request = OrderRequest(
                 market=market, side=Side.SELL, reason=exit_check.reason, strategy=self.strategy.name,
                 signal_time=now, client_id=f"{self.broker.mode}:{market}:SELL:{exit_check.reason}:{now.isoformat()}",
@@ -390,6 +464,7 @@ class TradingEngine:
             self.settings_version = version  # 잘못된 버전은 건너뛰고 다음 저장을 기다린다
             log.error("설정 v%d 무시(검증 실패): %s", version, exc)
             self.repo.log("ERROR", "settings_invalid", f"v{version} 검증 실패: {exc}")
+            self._notify(EventKind.SETTINGS, f"설정 v{version} 검증 실패", str(exc)[:500], key=f"settings:{version}")
             return None
         changes = self.runtime.changes_vs(new)
         if "strategy_name" in changes["hot"] or "strategy_params" in changes["hot"]:
@@ -410,6 +485,7 @@ class TradingEngine:
         message = f"설정 v{version} 반영: 즉시 {changes['hot'] or '없음'}, 재시작 필요 {changes['restart'] or '없음'}"
         log.info(message)
         self.repo.log("INFO", "settings_applied", message, {"version": version, **changes})
+        self._notify(EventKind.SETTINGS, f"설정 v{version} 반영", message, {"version": version, **changes})
         self.write_heartbeat()
         return changes
 
@@ -464,6 +540,8 @@ class TradingEngine:
                         self.risk.halt(str(args.get("reason") or "수동 긴급 정지"))
                     self.paused = True
                     result = "긴급 정지: 신규 진입 차단 + 일시정지"
+                    self._notify(EventKind.RISK_HALT, "긴급 정지",
+                                 f"{args.get('reason') or '수동 긴급 정지'} · 신규 진입 차단 + 일시정지", args)
                 elif name == "reload":
                     result = "설정 다시 읽기 예약 (다음 캔들 경계에 반영)"
                     self._reload_requested = True
@@ -471,6 +549,7 @@ class TradingEngine:
                     if isinstance(self.risk, RiskManager):
                         self.risk.resume()
                     result = "리스크 긴급 정지 해제"
+                    self._notify(EventKind.RISK_HALT, "긴급 정지 해제", "신규 진입 다시 허용 (일시정지는 resume 필요)")
                 else:
                     result = f"알 수 없는 명령: {cmd.command}"
             except Exception as exc:  # noqa: BLE001 - 명령 하나의 실패가 엔진을 멈추지 않게
@@ -505,6 +584,7 @@ class TradingEngine:
             self.stats.errors += 1
             log.error("시세 스트림 종료: %s (REST 현재가로 대체)", exc)
             self.repo.log("ERROR", "price_stream_failed", str(exc))
+            self._notify(EventKind.API_ERROR, "시세 스트림 끊김", f"{exc} (REST 현재가로 대체)", key="price_stream")
 
     async def run(self, *, duration_seconds: float | None = None) -> EngineStats:
         self.status = "starting"
@@ -517,6 +597,14 @@ class TradingEngine:
         if stale:
             self.repo.log("WARNING", "stale_commands", f"시작 전 대기 명령 {stale}건 무시", {"count": stale})
             log.warning("엔진 시작 전 대기 명령 %d건 무시", stale)
+        if self.notifier is not None:
+            await self.notifier.start()
+        restored = len(self.portfolio.positions)
+        self._notify(
+            EventKind.BOT_START, f"{self.strategy.name} · {', '.join(self.markets)} · {self.interval.value}",
+            f"현금 {self.portfolio.cash:,.0f}원" + (f" · 보유 포지션 {restored}개 복구 (재시작)" if restored else ""),
+            start_data,
+        )
         self.write_heartbeat("STARTING")
         await self.warmup()
         if isinstance(self.broker, LiveBroker):
@@ -582,6 +670,9 @@ class TradingEngine:
                             log.error("잔고 동기화 실패: %s", exc)
                     self.snapshot(now)
                     last_snapshot = now
+        except BaseException as exc:  # 비정상 종료·Ctrl+C 도 알림에 남긴다
+            self._stop_error = exc
+            raise
         finally:
             self.status = "stopping"
             price_task.cancel()
@@ -593,6 +684,11 @@ class TradingEngine:
             self.snapshot()
             self.repo.sync_portfolio(self.portfolio)
             self.repo.log("INFO", "bot_stop", f"{self.mode} 종료", {"stats": self.stats_dict()})
+            self._notify(EventKind.BOT_STOP, self._stop_reason(), self._stop_summary())
+            if self.notifier is not None:
+                with contextlib.suppress(Exception):
+                    await self.notifier.close(drain_seconds=5.0)
+                self.stats.extra["notifications"] = self.notifier.stats_dict()
             self.status = "stopped"
             self.write_heartbeat("STOPPED")
         return self.stats

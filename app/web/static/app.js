@@ -43,6 +43,7 @@
         meta: { available: {}, schemas: {}, intervals: [], risk_schema: {} },
         settingsVersion: 0, settingsHistory: [], form: null, saving: false, saveResult: null, formErrors: [],
         pockets: {}, transfer: { direction: "to_main", amount: 0, bot_pocket_uuid: null }, transferResult: null,
+        showDust: false,
         confirmLive: "", wsConnected: false, ws: null, toast: null, timers: [],
       };
     },
@@ -147,7 +148,20 @@
       },
       async halt() { const reason = prompt("긴급 정지 사유", "수동 정지"); if (reason != null) await this.cmd("halt", { reason }); },
       async kill() { if (confirm("엔진 프로세스를 강제 종료합니다. 먼저 Stop 을 시도했나요?")) await this.cmd("kill"); },
+      async notifyTest() {
+        try {
+          const r = await this.api("/api/notify/test", { method: "POST", body: {} });
+          const bad = Object.entries(r.results).filter(([, err]) => err);
+          if (bad.length) this.notify("알림 일부 실패: " + bad.map(([ch, err]) => ch + " — " + err).join("; "), "bad");
+          else this.notify("알림 발송 성공: " + Object.keys(r.results).join(", "), "ok");
+        } catch (e) { this.notify("알림 테스트 실패: " + e.message, "bad"); }
+      },
       // ---------- 포켓
+      // 0.00000001 같은 먼지 잔고는 기본으로 숨긴다 (KRW 는 항상 표시)
+      visibleBalances(list) {
+        const rows = list || [];
+        return this.showDust ? rows : rows.filter((b) => b.currency === "KRW" || (Number(b.balance) + Number(b.locked)) >= 1e-6);
+      },
       async loadPockets() { try { this.pockets = await this.api("/api/pockets"); } catch (e) { this.pockets = { error: e.message }; } },
       async doTransfer() {
         if (!confirm(`${this.transfer.direction === "to_bot" ? "메인 → 봇 포켓" : "봇 포켓 → 메인"} 으로 ${this.krw(this.transfer.amount)} 을 이전합니다. 계속할까요?`)) return;

@@ -28,7 +28,7 @@
 | 6 | 리스크 관리: 거래당 최대 투자금, 자산 대비 포지션 상한, 최대 포지션 수, 일일 최대 손실, 최대 연속 손실, 손절·익절·추적 손절(실시간 감시), 시세 괴리 방어, 재진입 대기 — 백테스트·모의매매 공용 | **완료** |
 | 7 | 실제 주문 모듈: 주문 API(생성·테스트·조회·취소·주문 가능 정보), LiveBroker(시장가, identifier 멱등, 폴링·취소, 잔고 동기화), 3중 안전장치, 엔진 하트비트·명령 큐(pause/resume/stop/halt), `order-test`/`control` 명령 — 기본 비활성 | **완료** |
 | 8 | 대시보드 (FastAPI + Vue, 빌드 없음): 자산·성과·신호·주문·로그 조회, 실행 설정(전략·파라미터·리스크·마켓·캔들) 버전 저장 → 다음 캔들부터 반영, Start/Pause/Resume/Stop/긴급 정지/강제 종료, 포켓 잔고·KRW 이전, WebSocket 실시간 갱신, 토큰 인증 — 엔진과 별도 프로세스 | **완료** |
-| 9 | 알림 (Telegram/Discord) | 예정 |
+| 9 | 알림: 매수·매도·주문 체결·거부·손절/익절/추적 손절·일일/연속 손실 한도·긴급 정지·API 오류·봇 시작/중지·설정 반영 → Telegram / Discord / 로그. 백그라운드 큐·재시도·오류 반복 억제, `notify-test` 명령, 대시보드 테스트 발송 | **완료** |
 | 10 | Docker / 서버 배포 | 예정 |
 
 ## 요구 사항
@@ -93,6 +93,10 @@ copy .env.example .env      # Windows
 | `DASHBOARD_HOST` / `DASHBOARD_PORT` | `127.0.0.1` / `8000` | 대시보드(`serve`) 바인드 주소·포트. 외부 바인드는 토큰 필수 |
 | `DASHBOARD_TOKEN` | 없음 | 설정하면 대시보드의 변경·제어 API 에 `X-Auth-Token` 필요. 없으면 로컬 호스트만 허용 |
 | `UPBIT_POCKET_ACCESS_KEY` / `UPBIT_POCKET_SECRET_KEY` | 없음 | 메인포켓에서 발급한 "포켓관리" 권한 키. 대시보드의 포켓 목록·메인→봇 KRW 이전에만 사용(주문에는 쓰지 않음) |
+| `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` | 없음 | Telegram 알림 채널 (둘 다 있어야 켜짐) |
+| `DISCORD_WEBHOOK_URL` | 없음 | Discord 웹훅 알림 채널 |
+| `NOTIFY_EVENTS` | `all` | 보낼 이벤트: `all` / `off` / 쉼표 목록 (`buy,sell,order_filled,stop_loss,daily_loss_limit,api_error,bot_start,bot_stop` 등) |
+| `NOTIFY_ERROR_COOLDOWN_SECONDS` / `NOTIFY_LOG` | `300` / `true` | 같은 API 오류 반복 알림 억제(초), 알림 본문을 로그에도 남길지 |
 | `UPBIT_API_URL` | `https://api.upbit.com` | REST 엔드포인트 |
 | `HTTP_TIMEOUT_SECONDS` / `HTTP_MAX_RETRIES` | `10` / `3` | HTTP 타임아웃(초), GET 재시도 횟수 |
 
@@ -122,6 +126,7 @@ copy .env.example .env      # Windows
 .venv\Scripts\python.exe -m app.main order-test KRW-BTC --amount 5000          # 주문 테스트 API 로 키·권한 검증 (실제 주문 없음)
 .venv\Scripts\python.exe -m app.main run --confirm-live REAL-MONEY             # LIVE (TRADING_MODE=LIVE + LIVE_TRADING_ENABLED=true 필요)
 .venv\Scripts\python.exe -m app.main serve                                   # 대시보드 http://127.0.0.1:8000 (엔진과 별도 프로세스)
+.venv\Scripts\python.exe -m app.main notify-test                             # 알림 채널(Telegram/Discord/로그) 테스트 발송
 ```
 
 `run` 은 기본(PAPER)에서 모의매매를 하고, LIVE 는 `.env` 이중 플래그와 `--confirm-live REAL-MONEY` 가 모두 있어야 한다. 시작 시 DB 에 계좌가 있으면 현금·포지션·처리 이력을 복구해 이어서 돌고,
@@ -144,6 +149,26 @@ copy .env.example .env      # Windows
 - **포켓 탭**: 봇 API Key 포켓의 잔고 조회, 봇 포켓 → 메인포켓 KRW 이전(봇 키에 "자산이전" 권한). 메인 → 봇 포켓 이전과 포켓 목록은 **메인포켓에서 발급한 "포켓관리" 권한 키**(`UPBIT_POCKET_ACCESS_KEY` / `UPBIT_POCKET_SECRET_KEY`)가 있을 때만 된다. 같은 계정 안의 이동일 뿐이며 외부 출금 API 는 없다.
 - **보안**: 기본 `127.0.0.1` 바인드. `DASHBOARD_TOKEN` 을 설정하면 변경·제어 API 에 `X-Auth-Token`(화면 상단 토큰 칸)이 필요하고, 설정하지 않으면 로컬 호스트에서만 변경을 허용한다. 외부 바인드는 토큰 없이는 거부된다. API Key 값은 화면·API 어디에도 나오지 않는다(설정 여부만 표시).
 - API: `GET /api/status|balance|positions|performance|recent|orders|trades|signals|logs|strategy|settings|pockets`, `PUT /api/settings`, `POST /api/bot/start|pause|resume|stop|halt|resume-risk|reload|kill`, `POST /api/pockets/transfer`, `WS /ws` — 모두 `?mode=paper|live` 로 기록을 고른다.
+
+### 알림 (Phase 9)
+
+`.env` 에 채널을 넣으면 엔진(`run`)이 다음 이벤트를 보낸다. 채널이 없어도 `NOTIFY_LOG=true`(기본)면 같은 내용이 로그에 남는다.
+
+| 이벤트 (`NOTIFY_EVENTS` 이름) | 언제 |
+| --- | --- |
+| `buy` / `sell` | 전략 신호가 리스크 검사를 통과해 시장가 주문을 낼 때 (금액·수량·사유) |
+| `order_filled` / `order_rejected` | 체결 확인(수량·체결가·수수료·매도면 손익·현금) / 주문 거부·미체결 |
+| `stop_loss` / `take_profit` / `trailing_stop` | 실시간 청산 감시가 발동해 매도 주문을 낼 때 (기준가·현재가·등락률) |
+| `daily_loss_limit` / `consecutive_loss_limit` | 일일 손실·연속 손실 한도 도달 → 당일 신규 진입 잠금 |
+| `risk_halt` | 긴급 정지(halt)·해제 |
+| `api_error` | 캔들 조회 실패, 시세 스트림 끊김 — 같은 원인은 `NOTIFY_ERROR_COOLDOWN_SECONDS` 동안 한 번만 |
+| `bot_start` / `bot_stop` | 시작(복구한 포지션 수 포함 = 재시작) / 종료(정상·Ctrl+C·비정상, 체결·오류 건수·실현손익) |
+| `settings` | 대시보드에서 저장한 실행 설정이 엔진에 반영되거나 검증에 실패했을 때 |
+
+- Telegram: [@BotFather](https://t.me/BotFather) 에서 `/newbot` 으로 봇을 만들어 토큰을 `TELEGRAM_BOT_TOKEN` 에 넣는다. 채널로 받으려면 채널 관리자에 봇을 추가(메시지 게시 권한)하고 메시지를 하나 올린 뒤 `notify-test --discover-telegram` 을 실행하면 채널 ID(`-100…`)가 나온다. 그 값을 `TELEGRAM_CHAT_ID` 에 넣는다(개인 대화면 봇에게 /start 를 보낸 뒤 같은 명령). Discord: 채널 설정 > 연동 > 웹훅 URL 을 `DISCORD_WEBHOOK_URL` 에.
+- `NOTIFY_EVENTS=all`(기본) / `off` / `buy,sell,stop_loss` 처럼 골라 받는다. 설정 후 `notify-test` 로 발송을 확인하거나 대시보드 제어 탭의 "테스트 발송" 을 누른다.
+- 알림은 매매를 멈추지 않는다: 엔진은 이벤트를 큐에 넣기만 하고, 별도 태스크가 전송한다. 실패는 재시도(2회) 후 `bot_logs` 에 `notify_failed` 로만 남는다. 토큰·웹훅 URL 은 로그·오류 메시지에서 가려진다.
+- 새 채널(Slack 등)은 `app/notify/` 에 `Notifier` 프로토콜(`name`, `send`, `aclose`) 구현 하나를 더하고 `build_notification_manager` 에 한 줄 추가하면 된다.
 
 `backtest` 는 API 로 받은 캔들을 `data/cache/` 에 저장해 다음 실행에서 재사용하고, 결과를 `data/backtests/<시각>_<마켓>_<단위>_<전략>/` 에 `summary.json`, `trades.csv`, `equity.csv`, `signals.csv` 로 남긴다(`--no-save` 로 생략). 출력 예:
 
@@ -217,7 +242,7 @@ WebSocket 요청 형식·재연결·치명적 오류 중단, 지표 손계산 �
 ```
 upbit-auto-trader/
 ├── app/
-│   ├── main.py                 # CLI 진입점 (check / ticker / candles / balance / stream / signal / backtest / run / status / control / order-test / serve)
+│   ├── main.py                 # CLI 진입점 (check / ticker / candles / balance / stream / signal / backtest / run / status / control / order-test / serve / notify-test)
 │   ├── config/settings.py      # pydantic-settings, TradingMode, LIVE 이중 안전장치
 │   ├── core/
 │   │   ├── exceptions.py       # TraderError → UpbitError → API/네트워크/응답 예외 계층
@@ -261,7 +286,12 @@ upbit-auto-trader/
 │   │   ├── server.py           # FastAPI: 조회·설정·제어·포켓 API, WebSocket /ws, 정적 파일, 토큰/로컬 인증
 │   │   ├── services.py         # 대시보드 조회 서비스(자산·성과·MDD·자산 곡선, 시세 캐시), 포켓 조회·이전
 │   │   └── process.py          # 엔진 프로세스 분리 실행·생존 판정(하트비트 45초)·강제 종료
-│   └── web/static/             # 대시보드 프론트: Vue 3 + Chart.js (빌드 없음) — index.html / app.js / style.css / vendor/
+│   ├── web/static/             # 대시보드 프론트: Vue 3 + Chart.js (빌드 없음) — index.html / app.js / style.css / vendor/
+│   └── notify/
+│       ├── base.py             # EventKind(14종), NotificationEvent, Notifier 프로토콜, 메시지 서식, NOTIFY_EVENTS 해석
+│       ├── manager.py          # NotificationManager: 필터·쿨다운·비차단 큐·워커·재시도·실패 콜백
+│       ├── telegram.py  discord.py  log.py   # 채널 구현 (토큰·URL 은 오류 메시지에서 제거)
+│       └── __init__.py         # build_notification_manager(.env → 채널 조립)
 ├── scripts/fetch_candles.py    # 과거 캔들 CSV 수집
 ├── scripts/serve_dashboard.py  # 어느 폴더에서든 대시보드 실행 (프로젝트 루트로 이동 후 serve)
 ├── tests/                      # pytest (네트워크 불필요)
@@ -346,6 +376,13 @@ WebSocket(Phase 2) 흐름:
 3. 실행 설정(`RuntimeSettings`)은 `.env` 에서 초기값을 만들고 이후 DB 버전이 우선한다. 엔진은 캔들 경계에서 DB 버전이 올라갔으면 전략·파라미터·리스크를 교체(전략이 바뀌면 워밍업 캔들도 다시 받음)하고, 마켓·캔들 단위 변경은 `restart_required` 로만 표시한다. 잘못된 버전(검증 실패)은 건너뛰고 로그를 남긴다.
 4. LIVE 시작은 CLI 와 같은 3중 잠금(.env 이중 플래그 → 확인 문구 → `allow_orders`)을 그대로 거친다. 대시보드가 켜지지 않아도 엔진은 CLI 만으로 완전히 동작한다.
 
+알림(Phase 9) 구조 — `엔진 → NotificationManager.emit(큐) → 워커 → Telegram / Discord / 로그`:
+
+1. 엔진은 주문·청산·리스크 잠금·오류·시작/종료 지점에서 `NotificationEvent` 를 만들어 큐에 넣기만 한다(동기, 비차단). 관리자가 없으면 아무 일도 하지 않으므로 알림 설정과 무관하게 매매 경로는 같다.
+2. 워커 태스크가 채널마다 순서대로 보내고, 실패는 재시도(1초·3초) 후 `notify_failed` 로그로만 남긴다. 예외는 엔진으로 전파되지 않는다. 종료 시 큐를 5초 안에서 비운 뒤 채널을 닫는다.
+3. `key` 가 있는 이벤트(API 오류)는 쿨다운 동안 같은 키를 한 번만 보내 오류 폭주를 막는다. 큐가 가득 차면 가장 오래된 알림을 버린다(매매보다 알림이 뒤로 밀린다).
+4. 비정상 종료(예외·Ctrl+C)도 `bot_stop` 알림에 사유가 들어간다. 토큰·웹훅 URL 은 채널 구현이 오류 문자열에서 지운다.
+
 자세한 API 사양(엔드포인트, 파라미터, 에러 코드, Rate Limit 표)은 [docs/upbit-api-notes.md](docs/upbit-api-notes.md).
 
 ## 주의
@@ -355,3 +392,4 @@ WebSocket(Phase 2) 흐름:
 - `.env` 를 잃어버리거나 노출했다면 즉시 업비트에서 해당 API Key 를 폐기한다.
 - 대시보드를 외부 네트워크에 열 때는 반드시 `DASHBOARD_TOKEN` 을 설정하고 HTTPS(리버스 프록시) 뒤에 둔다. 토큰은 `.env` 에만 둔다.
 - 포켓 이전은 같은 업비트 계정 안에서만 움직인다. 출금 API 는 어떤 화면·명령에도 없다.
+- 알림은 보조 수단이다. 전송 실패나 지연이 매매를 바꾸지 않으며, 알림이 오지 않았다고 주문이 없었던 것도 아니다. 진실은 DB(`status` 명령·대시보드)에 있다.

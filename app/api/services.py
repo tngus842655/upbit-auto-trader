@@ -94,6 +94,7 @@ class DashboardService:
             "live_allowed": self.settings.is_live_trading_allowed,
             "has_api_keys": self.settings.has_api_keys,
             "has_pocket_keys": self.settings.has_pocket_keys,
+            "notify_channels": self.settings.notify_channels,
             "engine": engine,
             "settings_version": repo.runtime_settings_version(),
             "server_time": datetime.now(KST).isoformat(),
