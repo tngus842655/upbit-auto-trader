@@ -18,6 +18,7 @@ from app.trading.live_broker import LiveBroker
 from app.trading.orders import PaperBroker
 from app.trading.portfolio import Portfolio
 from tests.test_engine import MARKET, T0, FakeClient, Harness, TimedStrategy
+from tests.test_strategy_data import make_candle
 from tests.test_websocket import ORDERBOOK_JSON
 
 
@@ -355,6 +356,94 @@ async def test_price_staleness_alert_once_until_recovered(make_settings) -> None
     h.now += timedelta(seconds=300)
     h.feed_prices(ask=101.0, bid=100.0)  # 시세 복구 → 리셋
     assert h.engine._check_price_staleness(h.now) is False and h.engine._price_stale_alerted is False
+
+
+class FailingRepo:
+    """지정한 메서드가 처음 n번 SQLite 잠금 오류를 내는 저장소 (감사 HIGH-6)."""
+
+    def __init__(self, real, method: str, fail_times: int) -> None:
+        self.real = real
+        self.method = method
+        self.fail_times = fail_times
+        self.failures = 0
+
+    def __getattr__(self, name):
+        attr = getattr(self.real, name)
+        if name != self.method:
+            return attr
+
+        def wrapped(*a, **k):
+            if self.failures < self.fail_times:
+                self.failures += 1
+                raise OperationalError("SELECT", {}, Exception("database is locked"))
+            return attr(*a, **k)
+
+        return wrapped
+
+
+def realtime_harness(make_settings) -> Harness:
+    h = Harness(make_settings)
+    h.engine.clock = lambda: datetime.now(UTC)
+    h.engine.command_poll_interval = 0.05
+    h.engine.heartbeat_interval = 0.05
+    base = datetime.now(UTC).replace(minute=0, second=0, microsecond=0)
+    h.client.candles = [make_candle(base - timedelta(hours=i), 100.0) for i in range(1, 12)]
+    return h
+
+
+async def test_run_survives_db_errors_in_loop_steps(make_settings) -> None:
+    """감사 HIGH-6: 명령 폴링·하트비트의 OperationalError 가 run() 을 끝내지 않는다."""
+    h = realtime_harness(make_settings)
+    real_repo = h.engine.repo
+    h.engine.repo = FailingRepo(real_repo, "pending_commands", fail_times=3)
+    h.engine.loop_error_backoff = 0.0
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.6)
+        real_repo.enqueue_command("stop")
+
+    stopper = asyncio.create_task(stop_soon())
+    stats = await h.engine.run(duration_seconds=5)
+    await stopper
+    assert h.engine.status == "stopped" and h.engine.repo.failures == 3
+    assert stats.loop_step_failures == 3 and stats.errors >= 3 and h.engine.safe_mode is False
+    events = [e.event for e in real_repo.recent_logs(30)]
+    assert events.count("loop_step_failed") == 3 and "bot_stop" in events
+    assert real_repo.read_engine_status().status == "STOPPED"
+
+
+async def test_heartbeat_db_failure_does_not_abort_start(make_settings) -> None:
+    h = realtime_harness(make_settings)
+    real_repo = h.engine.repo
+    h.engine.repo = FailingRepo(real_repo, "write_engine_status", fail_times=2)  # 시작 직후 하트비트 2번 실패
+
+    async def stop_soon() -> None:
+        await asyncio.sleep(0.3)
+        real_repo.enqueue_command("stop")
+
+    stopper = asyncio.create_task(stop_soon())
+    stats = await h.engine.run(duration_seconds=5)
+    await stopper
+    assert h.engine.status == "stopped" and stats.errors >= 2 and h.engine.repo.failures == 2
+    assert real_repo.read_engine_status().status == "STOPPED"  # 나중 하트비트는 정상 기록
+
+
+async def test_repeated_failures_enter_safe_mode(make_settings) -> None:
+    """연속 실패가 한도를 넘으면 안전 모드: 매수 신호를 무시하고 청산 감시는 계속한다."""
+    h = Harness(make_settings, actions={T0 + timedelta(hours=10): "BUY"})
+    h.engine.safe_mode_after_failures = 3
+    h.engine.loop_error_backoff = 0.0
+    for _ in range(3):
+        assert await h.engine._guarded("테스트", lambda: (_ for _ in ()).throw(RuntimeError("boom"))) is False
+    assert h.engine.safe_mode is True and h.engine.stats.loop_step_failures == 3
+    assert any(e.event == "safe_mode" for e in h.repo.recent_logs(10))
+    await h.engine.warmup()
+    h.now = T0 + timedelta(hours=11, seconds=5)
+    h.feed_prices(ask=110.0, bid=109.0)
+    await h.engine.process_closed_candles(h.now)
+    assert not h.portfolio.has_position(MARKET)  # 안전 모드에서는 매수하지 않는다
+    assert any(e.event == "safe_mode_skip" for e in h.repo.recent_logs(10))
+    assert h.engine.stats_dict()["safe_mode"] is True
 
 
 def test_live_mode_requires_flags_keys_and_live_broker(make_settings) -> None:

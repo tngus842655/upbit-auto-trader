@@ -30,6 +30,7 @@ class Database:
         connect_args: dict = {}
         if url.startswith("sqlite"):
             connect_args["check_same_thread"] = False
+            connect_args["timeout"] = 30.0  # 다른 프로세스(대시보드)가 쓰는 동안 최대 30초 대기 (감사 HIGH-6/MEDIUM-9)
             path = url.removeprefix("sqlite:///")
             if url in ("sqlite://", "sqlite:///:memory:") or path == ":memory:":
                 kwargs["poolclass"] = StaticPool

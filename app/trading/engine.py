@@ -82,6 +82,7 @@ class EngineStats:
     orders_resolved: int = 0  # 미확정 주문을 후속 조회로 확정한 수
     price_stream_restarts: int = 0  # 시세 스트림 재연결 횟수
     stale_signals_skipped: int = 0  # 정체 뒤 실행하지 않고 기록만 한 오래된 신호
+    loop_step_failures: int = 0  # 메인 루프 단계 실패(격리되어 계속 진행)
     risk_rejections: int = 0
     exits_triggered: int = 0
     risk_locks: int = 0
@@ -173,6 +174,11 @@ class TradingEngine:
         self.price_loop_backoff = 1.0
         self.price_loop_max_backoff = 60.0
         self.price_stale_alert_seconds = 120.0  # 포지션이 있는데 이만큼 시세가 없으면 알림
+        # 메인 루프 단계별 예외 격리 (감사 HIGH-6): 연속 실패가 쌓이면 안전 모드(신규 진입 중단, 청산 감시만)
+        self.safe_mode = False
+        self.safe_mode_after_failures = 10
+        self._consecutive_step_failures = 0
+        self.loop_error_backoff = 1.0
         self._price_stale_alerted = False
         self.heartbeat_interval = 10.0
         self._last_command_poll: datetime | None = None
@@ -333,6 +339,10 @@ class TradingEngine:
         if self.paused and signal.action.value == "BUY":
             log.info("일시정지 중 → 매수 신호 무시 %s", signal.market)
             self.repo.log("INFO", "paused_skip", f"{signal.market} BUY 신호 무시 (일시정지)")
+            return
+        if self.safe_mode and signal.action.value == "BUY":
+            log.warning("안전 모드 → 매수 신호 무시 %s", signal.market)
+            self._log_safely("WARNING", "safe_mode_skip", f"{signal.market} BUY 신호 무시 (안전 모드: 반복 오류)")
             return
         if signal.market in self.pending_orders:
             log.warning("%s 미확정 주문이 있어 신호 %s 건너뜀", signal.market, signal.action.value)
@@ -671,7 +681,7 @@ class TradingEngine:
             status = "PAUSED" if self.paused else ("RUNNING" if self.status == "running" else self.status.upper())
         equity = self.current_equity()
         risk_snapshot = self.risk.snapshot() if isinstance(self.risk, RiskManager) else None
-        self.repo.write_engine_status(
+        self._write_status_safely(
             status=status, strategy=self.strategy.name, markets=list(self.markets), interval=self.interval.value,
             started_at=self.stats.started_at, api_ok=self.stats.errors == 0 or self.stats.last_candle_check is not None,
             ws_status=self.ws_status, last_data_at=self.last_data_at(), last_candle_at=self.stats.last_candle_check,
@@ -731,6 +741,50 @@ class TradingEngine:
     # ------------------------------------------------------------------
     # 실행 루프
     # ------------------------------------------------------------------
+    def _write_status_safely(self, **fields: Any) -> None:
+        """하트비트 기록 실패(DB 잠금 등)가 엔진을 죽이지 않게 한다."""
+        try:
+            self.repo.write_engine_status(**fields)
+        except Exception as exc:  # noqa: BLE001
+            self.stats.errors += 1
+            log.warning("하트비트 기록 실패: %s", exc)
+
+    async def _guarded(self, step: str, action: Any) -> bool:
+        """메인 루프 한 단계를 실행하고 예외를 격리한다 (감사 HIGH-6). 성공이면 True.
+
+        - TraderError 든 DB OperationalError 든 pandas 예외든 루프를 죽이지 않는다.
+          기록·알림 후 다음 주기로 넘어간다.
+        - 연속 실패가 safe_mode_after_failures 를 넘으면 안전 모드(신규 진입 중단, 청산 감시·명령 처리는 계속)로
+          들어간다.
+        """
+        try:
+            result = action()
+            if asyncio.iscoroutine(result):
+                await result
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - 어떤 예외도 메인 루프를 끝내지 않는다
+            self.stats.errors += 1
+            self.stats.loop_step_failures += 1
+            self._consecutive_step_failures += 1
+            log.exception("루프 단계 실패 [%s] (%d회 연속)", step, self._consecutive_step_failures)
+            self._log_safely("ERROR", "loop_step_failed", f"{step}: {type(exc).__name__}: {exc}",
+                             {"consecutive": self._consecutive_step_failures})
+            self._notify(EventKind.API_ERROR, f"엔진 단계 실패: {step}", f"{type(exc).__name__}: {exc}",
+                         key=f"loop:{step}")
+            if not self.safe_mode and self._consecutive_step_failures >= self.safe_mode_after_failures:
+                self.safe_mode = True
+                log.error("연속 %d회 실패 → 안전 모드 (신규 진입 중단, 청산 감시만 유지)",
+                          self._consecutive_step_failures)
+                self._log_safely("ERROR", "safe_mode", f"연속 {self._consecutive_step_failures}회 실패 → 안전 모드")
+                self._notify(EventKind.RISK_HALT, "안전 모드 진입",
+                             "반복 오류로 신규 진입을 멈추고 청산 감시만 유지합니다", key="safe_mode")
+            with contextlib.suppress(Exception):
+                await self.sleep(self.loop_error_backoff)
+            return False
+        self._consecutive_step_failures = 0
+        return True
+
     def _log_safely(self, level: str, event: str, message: str, data: dict[str, Any] | None = None) -> None:
         """DB 기록 실패(잠금 등)가 호출자를 죽이지 않게 한다."""
         try:
@@ -867,43 +921,35 @@ class TradingEngine:
                 if self._stop.is_set():
                     break
                 now = self.clock()
-                self.poll_commands()
+                await self._guarded("명령 처리", self.poll_commands)
                 if self._stop.is_set():
                     break
                 if self._reload_requested:
                     self._reload_requested = False
-                    try:
-                        await self.maybe_reload_settings()
-                    except TraderError as exc:
-                        self.stats.errors += 1
-                        log.error("설정 다시 읽기 실패: %s", exc)
+                    await self._guarded("설정 다시 읽기", self.maybe_reload_settings)
                 if self.pending_orders:
-                    await self.resolve_pending_orders(now)
-                self._check_price_staleness(now)
+                    await self._guarded("미확정 주문 확정", lambda now=now: self.resolve_pending_orders(now))
+                await self._guarded("시세 점검", lambda now=now: self._check_price_staleness(now))
                 heartbeat_due = self._last_heartbeat is None or (
                     (now - self._last_heartbeat).total_seconds() >= self.heartbeat_interval
                 )
                 if heartbeat_due:
-                    self.write_heartbeat()
+                    await self._guarded("하트비트", self.write_heartbeat)
                 if now >= target - timedelta(milliseconds=1):
-                    try:
-                        await self.ensure_prices(now)
-                        await self.check_exits(now, force=True)
-                        await self.maybe_reload_settings()
-                        await self.process_closed_candles(now)
-                    except TraderError as exc:
-                        self.stats.errors += 1
-                        log.error("캔들 처리 실패: %s", exc)
+                    await self._guarded("시세 보정", lambda now=now: self.ensure_prices(now))
+                    await self._guarded("청산 감시", lambda now=now: self.check_exits(now, force=True))
+                    await self._guarded("설정 반영", self.maybe_reload_settings)
+                    await self._guarded("캔들 처리", lambda now=now: self.process_closed_candles(now))
                 if now >= snapshot_at - timedelta(milliseconds=1):
-                    await self.ensure_prices(now)
+                    await self._guarded("시세 보정", lambda now=now: self.ensure_prices(now))
                     if isinstance(self.broker, LiveBroker):
-                        try:
+
+                        async def _reconcile() -> None:
                             await self.broker.reconcile(self.markets)
                             self.repo.sync_portfolio(self.portfolio)
-                        except TraderError as exc:
-                            self.stats.errors += 1
-                            log.error("잔고 동기화 실패: %s", exc)
-                    self.snapshot(now)
+
+                        await self._guarded("잔고 동기화", _reconcile)
+                    await self._guarded("스냅샷", lambda now=now: self.snapshot(now))
                     last_snapshot = now
         except BaseException as exc:  # 비정상 종료·Ctrl+C 도 알림에 남긴다
             self._stop_error = exc
@@ -914,11 +960,16 @@ class TradingEngine:
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await price_task
             if self._ws is not None:
-                await self._ws.close()
-            await self.ensure_prices()
-            self.snapshot()
-            self.repo.sync_portfolio(self.portfolio)
-            self.repo.log("INFO", "bot_stop", f"{self.mode} 종료", {"stats": self.stats_dict()})
+                with contextlib.suppress(Exception):
+                    await self._ws.close()
+            # 종료 처리는 한 단계가 실패해도 나머지(기록·알림·하트비트)를 끝까지 진행한다
+            with contextlib.suppress(Exception):
+                await self.ensure_prices()
+            with contextlib.suppress(Exception):
+                self.snapshot()
+            with contextlib.suppress(Exception):
+                self.repo.sync_portfolio(self.portfolio)
+            self._log_safely("INFO", "bot_stop", f"{self.mode} 종료", {"stats": self.stats_dict()})
             self._notify(EventKind.BOT_STOP, self._stop_reason(), self._stop_summary())
             if self.notifier is not None:
                 with contextlib.suppress(Exception):
@@ -939,7 +990,8 @@ class TradingEngine:
             "actionable_signals": s.actionable_signals, "orders_filled": s.orders_filled,
             "orders_rejected": s.orders_rejected, "orders_unknown": s.orders_unknown,
             "orders_resolved": s.orders_resolved, "price_stream_restarts": s.price_stream_restarts,
-            "stale_signals_skipped": s.stale_signals_skipped,
+            "stale_signals_skipped": s.stale_signals_skipped, "loop_step_failures": s.loop_step_failures,
+            "safe_mode": self.safe_mode,
             "risk_rejections": s.risk_rejections,
             "snapshots": s.snapshots, "price_updates": s.price_updates, "errors": s.errors,
             "exits_triggered": s.exits_triggered, "risk_locks": s.risk_locks, "last_equity": s.last_equity,

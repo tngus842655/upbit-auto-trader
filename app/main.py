@@ -772,6 +772,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("중단됨", file=sys.stderr)
         return 130
+    except Exception as exc:  # noqa: BLE001 - 예상 못 한 예외도 추적 로그를 남기고 종료 코드로 알린다
+        log.exception("치명적 오류로 종료")
+        print(f"치명적 오류로 종료: {type(exc).__name__}: {exc} (logs/ 확인)", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
