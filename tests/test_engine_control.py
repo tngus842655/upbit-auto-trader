@@ -103,6 +103,26 @@ async def test_run_loop_processes_commands_and_heartbeats(make_settings) -> None
     assert any(e.event == "stale_commands" for e in h.repo.recent_logs(20))
 
 
+async def test_unknown_order_is_recorded_without_touching_portfolio(make_settings) -> None:
+    """감사 CRITICAL-1/HIGH-1: UNKNOWN 주문은 계좌를 바꾸지 않고 기록·알림만 남긴다."""
+    from app.trading.orders import Order, OrderStatus, OrderType
+    from app.trading.portfolio import Side
+
+    h = Harness(make_settings)
+    order = Order(
+        id="o-unknown", client_id="paper:KRW-BTC:BUY:x", mode="paper", market=MARKET, side=Side.BUY,
+        order_type=OrderType.MARKET, amount=100_000, quantity=None, status=OrderStatus.UNKNOWN, created_at=h.now,
+        error="주문 응답 없음, 생성 여부 확인 실패 (identifier c1, 운영자 확인 필요)", exchange_identifier="c1",
+    )
+    h.engine._record_order(order)
+    assert h.engine.stats.orders_unknown == 1 and h.engine.stats.orders_filled == 0
+    assert h.portfolio.cash == 1_000_000 and not h.portfolio.has_position(MARKET)
+    saved = h.repo.recent_orders(1)[0]
+    assert saved.status == "UNKNOWN" and saved.client_id == order.client_id
+    assert any(e.event == "order_unknown" and e.level == "ERROR" for e in h.repo.recent_logs(5))
+    assert h.engine.stats_dict()["orders_unknown"] == 1
+
+
 def test_live_mode_requires_flags_keys_and_live_broker(make_settings) -> None:
     portfolio = Portfolio(100_000)
     client = FakeClient([])

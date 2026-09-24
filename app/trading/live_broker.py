@@ -14,7 +14,10 @@ PaperBroker 와 같은 ``execute(request, price, now) -> Order`` 인터페이스
 - 주문 응답을 받은 뒤 ``GET /v1/order`` 를 폴링해 ``done``/``cancel`` 이 될 때까지 기다린다 (기본 30초).
   시간이 지나도 미체결이면 취소 접수 후 최종 상태를 읽어 부분 체결만 반영한다.
 - 체결 금액·수량·수수료는 거래소 응답(``trades``, ``executed_volume``, ``paid_fee``)을 그대로 Portfolio 에 반영한다.
-- 네트워크 오류로 주문 생성 응답을 못 받았으면 identifier 로 조회해 실제로 생성됐는지 확인한다 (중복 주문 방지).
+- 네트워크 오류로 주문 생성 응답을 못 받았으면 **같은 identifier 로만** 백오프 재조회해 생성 여부를 확인한다.
+  끝내 확인이 안 되면 ``UNKNOWN`` 으로 남기고, 절대 새 identifier 로 다시 주문하지 않는다
+  (중복 주문 방지, 감사 CRITICAL-1).
+  재조회가 전부 404(order_not_found) 이면 — 수 초 간격으로 반복한 뒤에만 — 미생성으로 판정한다.
 """
 
 from __future__ import annotations
@@ -91,6 +94,8 @@ class LiveBroker:
         poll_interval: float = 0.5,
         fill_timeout: float = 30.0,
         max_attempts: int = 2,
+        lookup_attempts: int = 5,
+        lookup_backoff: float = 1.0,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         self.client = client
@@ -100,6 +105,8 @@ class LiveBroker:
         self.poll_interval = poll_interval
         self.fill_timeout = fill_timeout
         self.max_attempts = max_attempts
+        self.lookup_attempts = max(1, lookup_attempts)
+        self.lookup_backoff = lookup_backoff
         self._sleep = sleep
         self.last_chance: dict[str, Any] | None = None
 
@@ -126,16 +133,28 @@ class LiveBroker:
         for attempt in range(1, self.max_attempts + 1):
             identifier = make_identifier(client_id, attempt)
             params["identifier"] = identifier
+            order.exchange_identifier = identifier
             try:
                 info = await self.client.create_order(params)
                 break
             except UpbitNetworkError as exc:
-                # 응답을 못 받았을 뿐 주문이 생성됐을 수 있다 → identifier 로 확인 (중복 주문 방지)
-                last_error = f"네트워크 오류: {exc}"
-                log.warning("주문 응답 없음(%s) → identifier %s 로 확인", exc, identifier)
-                info = await self._find_by_identifier(identifier)
-                if info is not None:
+                # 응답을 못 받았을 뿐 주문이 생성됐을 수 있다 → 같은 identifier 로만 확인한다.
+                # 새 identifier 로 재주문하면 중복 매수/매도가 되므로 절대 하지 않는다 (감사 CRITICAL-1).
+                log.warning("주문 응답 없음(%s) → identifier %s 로 생성 여부 확인", exc, identifier)
+                found, confirmed_missing = await self._confirm_by_identifier(identifier)
+                if found is not None:
+                    info = found
                     break
+                if confirmed_missing:
+                    return self._reject(order, f"네트워크 오류 뒤 주문 미생성 확인 (identifier {identifier}): {exc}")
+                self.processed.add(client_id)  # 확인될 때까지 같은 신호를 다시 내지 않는다
+                order.status = OrderStatus.UNKNOWN
+                order.error = (
+                    "주문 응답 없음, 생성 여부 확인 실패 — 거래소에 주문이 남아 있을 수 있음 "
+                    f"(identifier {identifier}, 운영자 확인 필요): {exc}"
+                )
+                log.error("주문 상태 미확인 %s %s: %s", order.market, order.side.value, order.error)
+                return order
             except UpbitAPIError as exc:
                 last_error = f"거래소 거부: {exc}"
                 if exc.name == "duplicated_identifier":
@@ -188,15 +207,29 @@ class LiveBroker:
         order.quantity = quantity
         return self.client.market_sell_params(request.market, quantity)
 
-    async def _find_by_identifier(self, identifier: str) -> OrderInfo | None:
-        try:
-            return await self.client.get_order(identifier=identifier)
-        except UpbitAPIError as exc:
-            if exc.status_code == 404:
-                return None
-            raise
-        except UpbitNetworkError:
-            return None
+    async def _confirm_by_identifier(self, identifier: str) -> tuple[OrderInfo | None, bool]:
+        """네트워크 오류 뒤 주문 존재 확인 → (주문, 미생성 확정 여부).
+
+        - 조회가 되면 그 주문을 돌려준다 (재주문 없이 이어서 처리).
+        - 모든 시도가 404(order_not_found) 이면 미생성으로 확정한다 — 반드시 백오프 간격을 두고 반복한 뒤에만.
+        - 조회 자체가 실패(타임아웃·기타 오류)한 시도가 하나라도 있으면 확정하지 않는다 → (None, False).
+        """
+        delay = self.lookup_backoff
+        not_found = 0
+        for attempt in range(1, self.lookup_attempts + 1):
+            try:
+                return await self.client.get_order(identifier=identifier), False
+            except UpbitAPIError as exc:
+                if exc.status_code == 404:
+                    not_found += 1
+                else:
+                    log.warning("identifier %s 조회 실패(%s)", identifier, exc)
+            except UpbitError as exc:
+                log.warning("identifier %s 조회 실패(%s)", identifier, exc)
+            if attempt < self.lookup_attempts:
+                await self._sleep(delay)
+                delay = min(delay * 2, 15.0)
+        return None, not_found == self.lookup_attempts
 
     async def _wait_for_fill(self, info: OrderInfo) -> OrderInfo:
         elapsed = 0.0

@@ -58,10 +58,11 @@ class FakeClient:
     """create → (폴링) get_order → 체결 시나리오를 스크립트로 재현한다."""
 
     def __init__(self, *, chance_obj: OrderChance | None = None, create_results=None, order_states=None,
-                 allow: bool = True) -> None:
+                 allow: bool = True, lookup_results=None) -> None:
         self.chance_obj = chance_obj or chance()
         self.create_results = list(create_results or [])  # OrderInfo 또는 Exception
         self.order_states = list(order_states or [])  # get_order 응답 순서
+        self.lookup_results = list(lookup_results or [])  # identifier 조회 응답 순서 (OrderInfo 또는 Exception)
         self.created: list[dict] = []
         self.cancelled: list[str] = []
         self.identifier_lookups: list[str] = []
@@ -89,6 +90,11 @@ class FakeClient:
     async def get_order(self, *, uuid=None, identifier=None):
         if identifier is not None:
             self.identifier_lookups.append(identifier)
+            if self.lookup_results:
+                result = self.lookup_results.pop(0)
+                if isinstance(result, Exception):
+                    raise result
+                return result
             found = [o for o in self.order_states if o.identifier == identifier]
             if not found:
                 raise UpbitAPIError(404, "order_not_found", "not found")
@@ -234,12 +240,57 @@ class TestBuy:
         assert client.identifier_lookups == ["c6"] and len(client.created) == 1
 
     async def test_network_error_without_order_is_rejected(self, make_settings) -> None:
-        errors = [UpbitNetworkError("timeout"), UpbitNetworkError("timeout")]
-        client = FakeClient(create_results=errors, order_states=[])
-        broker = LiveBroker(client, Portfolio(1_000_000), armed_settings(make_settings), sleep=no_sleep, max_attempts=2)
+        """응답 유실 뒤 같은 identifier 재조회가 전부 404 → 미생성 확정 → 재주문 없이 거부."""
+        client = FakeClient(create_results=[UpbitNetworkError("timeout")], order_states=[])
+        sleeps: list[float] = []
+
+        async def record_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+
+        broker = LiveBroker(client, Portfolio(1_000_000), armed_settings(make_settings), sleep=record_sleep,
+                            lookup_attempts=3, lookup_backoff=1.0)
         order = await broker.execute(OrderRequest(M, Side.BUY, amount=10_000, client_id="c7"), None, NOW)
-        assert order.status is OrderStatus.REJECTED and "네트워크" in order.error
-        assert client.identifier_lookups == ["c7", "c7-r2"]
+        assert order.status is OrderStatus.REJECTED and "미생성" in order.error
+        assert len(client.created) == 1 and client.identifier_lookups == ["c7", "c7", "c7"]
+        assert sleeps == [1.0, 2.0]  # 수 초 간격을 두고 재조회한 뒤에만 미생성으로 판정
+        assert "c7" not in broker.processed
+
+    async def test_network_error_then_lookup_failure_marks_unknown_without_reorder(self, make_settings) -> None:
+        """감사 CRITICAL-1: 서버 생성 + 응답 유실 + 조회 실패 → 새 identifier 로 재주문하지 않고 UNKNOWN."""
+        lookups = [UpbitNetworkError("GET timeout")] * 3
+        client = FakeClient(create_results=[UpbitNetworkError("POST timeout")], lookup_results=lookups)
+        broker = LiveBroker(client, Portfolio(1_000_000), armed_settings(make_settings), sleep=no_sleep,
+                            lookup_attempts=3)
+        order = await broker.execute(OrderRequest(M, Side.BUY, amount=10_000, client_id="c8"), None, NOW)
+        assert order.status is OrderStatus.UNKNOWN and order.exchange_identifier == "c8"
+        assert "운영자 확인" in order.error
+        assert len(client.created) == 1 and client.identifier_lookups == ["c8", "c8", "c8"]
+        assert "c8" in broker.processed  # 확인 전까지 같은 신호 재주문 금지
+        assert broker.portfolio.cash == 1_000_000  # 계좌는 건드리지 않는다
+
+    async def test_network_error_then_mixed_404_and_timeout_stays_unknown(self, make_settings) -> None:
+        """404 와 조회 실패가 섞이면 미생성으로 확정하지 않는다 (보수적으로 UNKNOWN)."""
+        lookups = [UpbitAPIError(404, "order_not_found", "x"), UpbitNetworkError("t"),
+                   UpbitAPIError(404, "order_not_found", "x")]
+        client = FakeClient(create_results=[UpbitNetworkError("POST timeout")], lookup_results=lookups)
+        broker = LiveBroker(client, Portfolio(1_000_000), armed_settings(make_settings), sleep=no_sleep,
+                            lookup_attempts=3)
+        order = await broker.execute(OrderRequest(M, Side.BUY, amount=10_000, client_id="c8b"), None, NOW)
+        assert order.status is OrderStatus.UNKNOWN and len(client.created) == 1
+
+    async def test_network_error_then_delayed_visibility_adopts_existing_order(self, make_settings) -> None:
+        """잠깐 404 였다가 보이면 그 주문을 그대로 이어서 처리한다 (재주문 없음)."""
+        done = order_info("u9", side="bid", state="done", executed="0.0001", fee="5",
+                          trades=[trade("100000000", "0.0001")], identifier="c9")
+        lookups = [UpbitAPIError(404, "order_not_found", "x"), UpbitAPIError(404, "order_not_found", "x"), done]
+        client = FakeClient(create_results=[UpbitNetworkError("POST timeout")], lookup_results=lookups,
+                            order_states=[done])
+        broker = LiveBroker(client, Portfolio(1_000_000), armed_settings(make_settings), sleep=no_sleep,
+                            lookup_attempts=5)
+        order = await broker.execute(OrderRequest(M, Side.BUY, amount=10_000, client_id="c9"), None, NOW)
+        assert order.status is OrderStatus.FILLED and order.exchange_order_id == "u9"
+        assert len(client.created) == 1 and client.identifier_lookups == ["c9", "c9", "c9"]
+        assert broker.portfolio.cash == pytest.approx(1_000_000 - 10_000 - 5)
 
     async def test_unfilled_order_is_cancelled_after_timeout(self, make_settings) -> None:
         waiting = order_info("u4", side="bid", state="wait")

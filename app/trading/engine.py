@@ -40,7 +40,7 @@ from app.risk.manager import RiskManager
 from app.strategy.base import Signal, Strategy
 from app.trading.live_broker import LiveBroker
 from app.trading.market_state import MarketState
-from app.trading.orders import Order, OrderRequest, PaperBroker
+from app.trading.orders import Order, OrderRequest, OrderStatus, PaperBroker
 from app.trading.portfolio import Portfolio, Side, Trade
 from app.trading.runtime_settings import RuntimeSettings
 
@@ -78,6 +78,7 @@ class EngineStats:
     actionable_signals: int = 0
     orders_filled: int = 0
     orders_rejected: int = 0
+    orders_unknown: int = 0  # 거래소 생성 여부 미확인 (운영자 확인 필요)
     risk_rejections: int = 0
     exits_triggered: int = 0
     risk_locks: int = 0
@@ -354,6 +355,15 @@ class TradingEngine:
             self._notify(EventKind.ORDER_FILLED, f"{order.market} {'매수' if order.side is Side.BUY else '매도'}",
                          self._fill_summary(order, new_trades), {"order": order.to_dict()})
             self.snapshot(order.filled_at)
+        elif order.status is OrderStatus.UNKNOWN:
+            # 거래소에 주문이 있을 수 있는데 확인이 안 된 상태. 계좌는 건드리지 않고 기록·알림만 남긴다.
+            self.stats.orders_unknown += 1
+            log.error("주문 상태 미확인 %s %s: %s", order.market, order.side.value, order.error)
+            self.repo.log("ERROR", "order_unknown", f"{order.market} {order.side.value}: {order.error}",
+                          order.to_dict())
+            side_label = '매수' if order.side is Side.BUY else '매도'
+            self._notify(EventKind.ORDER_REJECTED, f"{order.market} {side_label} 상태 미확인 (운영자 확인 필요)",
+                         str(order.error or ""), {"order": order.to_dict()})
         else:
             self.stats.orders_rejected += 1
             log.warning("주문 거부 %s %s: %s", order.market, order.side.value, order.error)
@@ -702,7 +712,8 @@ class TradingEngine:
             "started_at": s.started_at.isoformat() if s.started_at else None,
             "candle_checks": s.candle_checks, "closed_candles": s.closed_candles, "signals": s.signals,
             "actionable_signals": s.actionable_signals, "orders_filled": s.orders_filled,
-            "orders_rejected": s.orders_rejected, "risk_rejections": s.risk_rejections,
+            "orders_rejected": s.orders_rejected, "orders_unknown": s.orders_unknown,
+            "risk_rejections": s.risk_rejections,
             "snapshots": s.snapshots, "price_updates": s.price_updates, "errors": s.errors,
             "exits_triggered": s.exits_triggered, "risk_locks": s.risk_locks, "last_equity": s.last_equity,
             "commands_processed": s.commands_processed, "heartbeats": s.heartbeats, "paused": self.paused,

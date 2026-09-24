@@ -24,6 +24,7 @@ class OrderStatus(StrEnum):
     NEW = "NEW"
     FILLED = "FILLED"
     REJECTED = "REJECTED"
+    UNKNOWN = "UNKNOWN"  # 거래소에 주문이 생겼을 수 있으나 확인하지 못함 (응답 유실 + 조회 실패) — 운영자 확인 필요
 
 
 class OrderType(StrEnum):
@@ -69,6 +70,7 @@ class Order:
     fee: float = 0.0
     error: str | None = None
     exchange_order_id: str | None = None
+    exchange_identifier: str | None = None  # 업비트 identifier (UNKNOWN 주문을 나중에 조회·복구할 때 사용)
     fills: list[Fill] = field(default_factory=list)
 
     @property
@@ -84,6 +86,7 @@ class Order:
             "signal_time": self.signal_time.isoformat() if self.signal_time else None,
             "filled_at": self.filled_at.isoformat() if self.filled_at else None, "fill_price": self.fill_price,
             "filled_quantity": self.filled_quantity, "fee": self.fee, "error": self.error,
+            "exchange_order_id": self.exchange_order_id, "exchange_identifier": self.exchange_identifier,
         }
 
 
