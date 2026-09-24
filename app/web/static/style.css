@@ -117,3 +117,8 @@ table.history td, table.history th { overflow: hidden; }
 td.ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
 .history-scroll { max-height: 418px; overflow-y: auto; overflow-x: hidden; }  /* 헤더 + 10줄 */
 .history-scroll thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+
+/* ---------- 로그 탭 ---------- */
+.logfilter { margin-bottom: 8px; }
+.logfilter input[type=date] { width: 150px; }
+.logscroll { max-height: 72vh; overflow-y: auto; }

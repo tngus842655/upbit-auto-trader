@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -50,7 +51,7 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
     db.create_all()
     public_client = public_client or UpbitClient(base_url=settings.upbit_api_url, timeout=settings.http_timeout_seconds)
     service = service or DashboardService(settings, db, public_client)
-    backtests = backtests or BacktestRunner(settings)
+    backtests = backtests or BacktestRunner(settings, repo=service.repo("paper"))
 
     app = FastAPI(title="upbit-auto-trader 대시보드", version="0.8")
 
@@ -124,15 +125,28 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
     ) -> list[dict[str, Any]]:
         return service.recent(mode, limit)["signals"]
 
+    def _kst_day(text: str) -> datetime:
+        return datetime.strptime(text.strip(), "%Y-%m-%d").replace(tzinfo=KST)
+
     @app.get("/api/logs")
-    async def api_logs(mode: str = Depends(mode_param), limit: int = Query(50, ge=1, le=500),
-                       level: str | None = None) -> list[dict[str, Any]]:
-        repo = service.repo(mode)
-        return [
-            {"time": from_db_time(e.time).astimezone(KST).isoformat(), "level": e.level, "event": e.event,
-             "message": e.message, "data": e.data}
-            for e in repo.recent_logs(limit, level=level)
+    async def api_logs(
+        mode: str = Depends(mode_param), limit: int = Query(100, ge=1, le=500), level: str | None = None,
+        before_id: int | None = Query(None, ge=1), date_from: str | None = None, date_to: str | None = None,
+        q: str | None = Query(None, max_length=100),
+    ) -> dict[str, Any]:
+        """최근 로그부터 limit 개. before_id 로 이전 페이지, 날짜(KST)·레벨·q(이벤트·메시지)로 거른다."""
+        try:
+            since = _kst_day(date_from) if date_from else None
+            until = _kst_day(date_to) + timedelta(days=1) if date_to else None
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail="날짜 형식은 YYYY-MM-DD 입니다") from exc
+        rows = service.repo(mode).query_logs(limit, level=level, before_id=before_id, since=since, until=until, text=q)
+        items = [
+            {"id": e.id, "time": from_db_time(e.time).astimezone(KST).isoformat(), "level": e.level,
+             "event": e.event, "message": e.message, "data": e.data}
+            for e in rows
         ]
+        return {"items": items, "has_more": len(items) == limit, "next_before_id": items[-1]["id"] if items else None}
 
     @app.get("/api/markets")
     async def api_markets(
@@ -155,10 +169,10 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
 
     @app.get("/api/backtest/jobs/{job_id}")
     async def api_backtest_job(job_id: str) -> dict[str, Any]:
-        job = backtests.get(job_id)
+        job = backtests.get_dict(job_id)
         if job is None:
             raise HTTPException(status_code=404, detail="백테스트 작업을 찾을 수 없습니다")
-        return job.to_dict()
+        return job
 
     @app.post("/api/backtest/jobs", dependencies=[Depends(require_auth)])
     async def api_backtest_submit(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
@@ -172,11 +186,18 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
         service.repo("paper").log("INFO", "backtest_start", f"대시보드 백테스트 {job.label}", {"job": job.id})
         return job.to_dict(with_results=False)
 
-    @app.delete("/api/backtest/jobs/{job_id}", dependencies=[Depends(require_auth)])
+    @app.post("/api/backtest/jobs/{job_id}/cancel", dependencies=[Depends(require_auth)])
     async def api_backtest_cancel(job_id: str) -> dict[str, Any]:
         if not await backtests.cancel(job_id):
-            raise HTTPException(status_code=404, detail="백테스트 작업을 찾을 수 없습니다")
+            raise HTTPException(status_code=404, detail="실행 중인 백테스트 작업이 아닙니다")
         return {"cancelled": True, "id": job_id}
+
+    @app.delete("/api/backtest/jobs/{job_id}", dependencies=[Depends(require_auth)])
+    async def api_backtest_delete(job_id: str) -> dict[str, Any]:
+        """결과를 목록과 DB 에서 지운다 (실행 중이면 먼저 중단)."""
+        if not await backtests.delete(job_id):
+            raise HTTPException(status_code=404, detail="백테스트 작업을 찾을 수 없습니다")
+        return {"deleted": True, "id": job_id}
 
     # ------------------------------------------------------------------ 전략 · 설정
     def _current_runtime(mode: str) -> tuple[RuntimeSettings, int]:

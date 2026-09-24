@@ -8,12 +8,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import delete, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.database.database import Database
 from app.database.models import (
     AccountRecord,
+    BacktestJobRecord,
     BalanceSnapshot,
     BotCommand,
     BotLog,
@@ -251,6 +252,26 @@ class Repository:
                 stmt = stmt.where(BotLog.level == level.upper())
             return list(s.execute(stmt.order_by(BotLog.time.desc()).limit(limit)).scalars())
 
+    def query_logs(
+        self, limit: int = 100, *, level: str | None = None, before_id: int | None = None,
+        since: datetime | None = None, until: datetime | None = None, text: str | None = None,
+    ) -> list[BotLog]:
+        """로그 페이징 조회 — id 내림차순, ``before_id`` 보다 작은 것부터. since/until 은 aware datetime."""
+        with self.db.session() as s:
+            stmt = select(BotLog).where(BotLog.mode == self.mode)
+            if level:
+                stmt = stmt.where(BotLog.level == level.upper())
+            if before_id is not None:
+                stmt = stmt.where(BotLog.id < before_id)
+            if since is not None:
+                stmt = stmt.where(BotLog.time >= to_db_time(since))
+            if until is not None:
+                stmt = stmt.where(BotLog.time < to_db_time(until))
+            if text:
+                pattern = f"%{text}%"
+                stmt = stmt.where(or_(BotLog.event.ilike(pattern), BotLog.message.ilike(pattern)))
+            return list(s.execute(stmt.order_by(BotLog.id.desc()).limit(limit)).scalars())
+
     # ------------------------------------------------------------------
     # 엔진 상태 · 명령 큐 (대시보드 연동용)
     # ------------------------------------------------------------------
@@ -351,3 +372,65 @@ class Repository:
         with self.db.session() as s:
             stmt = select(CandleRecord.time).where(CandleRecord.market == market, CandleRecord.interval == interval)
             return [from_db_time(t) for t in s.execute(stmt.order_by(CandleRecord.time)).scalars()]
+
+    # ------------------------------------------------------------------
+    # 백테스트 작업 기록 (대시보드, 모드와 무관)
+    # ------------------------------------------------------------------
+    def save_backtest_job(self, snapshot: dict[str, Any]) -> None:
+        """작업 상태·결과를 통째로 저장한다 (있으면 갱신)."""
+        with self.db.session() as s:
+            record = s.get(BacktestJobRecord, snapshot["id"])
+            if record is None:
+                record = BacktestJobRecord(
+                    id=snapshot["id"], created_at=to_db_time(snapshot["created_at"]), request=snapshot["request"]
+                )
+                s.add(record)
+            record.finished_at = to_db_time(snapshot.get("finished_at"))
+            record.status = snapshot["status"]
+            record.label = snapshot.get("label", "")
+            record.progress = int(snapshot.get("progress", 0))
+            record.total = int(snapshot.get("total", 0))
+            record.ok = int(snapshot.get("ok", 0))
+            record.failed = int(snapshot.get("failed", 0))
+            record.request = snapshot["request"]
+            record.results = list(snapshot.get("results", []))
+            record.error = snapshot.get("error")
+
+    def list_backtest_jobs(self, limit: int = 100) -> list[dict[str, Any]]:
+        """최근 순 목록 — 결과 본문(JSON)은 빼고 가져온다."""
+        cols = (
+            BacktestJobRecord.id, BacktestJobRecord.created_at, BacktestJobRecord.finished_at,
+            BacktestJobRecord.status, BacktestJobRecord.label, BacktestJobRecord.progress, BacktestJobRecord.total,
+            BacktestJobRecord.ok, BacktestJobRecord.failed, BacktestJobRecord.request, BacktestJobRecord.error,
+        )
+        with self.db.session() as s:
+            rows = s.execute(select(*cols).order_by(BacktestJobRecord.created_at.desc()).limit(limit)).all()
+        return [
+            {
+                "id": r.id, "created_at": from_db_time(r.created_at), "finished_at": from_db_time(r.finished_at),
+                "status": r.status, "label": r.label, "progress": r.progress, "total": r.total, "ok": r.ok,
+                "failed": r.failed, "request": r.request, "error": r.error,
+            }
+            for r in rows
+        ]
+
+    def load_backtest_job(self, job_id: str) -> BacktestJobRecord | None:
+        with self.db.session() as s:
+            return s.get(BacktestJobRecord, job_id)
+
+    def delete_backtest_job(self, job_id: str) -> bool:
+        with self.db.session() as s:
+            record = s.get(BacktestJobRecord, job_id)
+            if record is None:
+                return False
+            s.delete(record)
+            return True
+
+    def trim_backtest_jobs(self, keep: int = 100) -> int:
+        """최근 keep 개만 남기고 오래된 기록을 지운다. 지운 개수를 돌려준다."""
+        with self.db.session() as s:
+            stmt = select(BacktestJobRecord.id).order_by(BacktestJobRecord.created_at.desc()).offset(keep)
+            ids = list(s.execute(stmt).scalars())
+            if ids:
+                s.execute(delete(BacktestJobRecord).where(BacktestJobRecord.id.in_(ids)))
+            return len(ids)

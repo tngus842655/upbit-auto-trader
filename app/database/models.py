@@ -244,3 +244,22 @@ class BotSettingsRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, index=True)
 
     __table_args__ = (UniqueConstraint("mode", "version", name="uq_bot_settings_version"),)
+
+
+class BacktestJobRecord(Base):
+    """대시보드 백테스트 작업 기록 — 서버를 재시작해도 이전 결과를 다시 볼 수 있다 (모드와 무관)."""
+
+    __tablename__ = "backtest_jobs"
+
+    id: Mapped[str] = mapped_column(String(16), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, index=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    status: Mapped[str] = mapped_column(String(12), default="queued")
+    label: Mapped[str] = mapped_column(String(200), default="")
+    progress: Mapped[int] = mapped_column(Integer, default=0)
+    total: Mapped[int] = mapped_column(Integer, default=0)
+    ok: Mapped[int] = mapped_column(Integer, default=0)
+    failed: Mapped[int] = mapped_column(Integer, default=0)
+    request: Mapped[dict[str, Any]] = mapped_column(JSON)
+    results: Mapped[list[Any]] = mapped_column(JSON, default=list)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)

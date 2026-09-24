@@ -18,7 +18,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -27,13 +27,18 @@ from app.backtest import BacktestConfig, BacktestEngine, load_candles, save_resu
 from app.backtest.engine import BacktestResult
 from app.config.settings import PROJECT_ROOT, Settings
 from app.core.exceptions import TraderError
+from app.database.models import from_db_time
 from app.exchange.models import KST, CandleInterval
 from app.risk.config import RiskConfig
 from app.strategy import STRATEGIES, create_strategy
 
+if TYPE_CHECKING:
+    from app.database.repository import Repository
+
 log = logging.getLogger(__name__)
 
 MAX_JOBS = 20
+KEEP_JOBS = 100  # DB 에 남기는 최근 작업 수
 MAX_EQUITY_POINTS = 300
 MAX_TRADES = 60
 
@@ -152,6 +157,15 @@ class BacktestJob:
         req = self.request
         return f"{req.strategy_name} · {', '.join(req.markets)} · {req.candle_interval} · 구간 {len(req.periods)}개"
 
+    def snapshot(self) -> dict[str, Any]:
+        """DB 저장용 스냅샷 (시각은 aware datetime 그대로, request 는 JSON 형태)."""
+        d = self.to_dict(with_results=False)
+        return {
+            "id": self.id, "created_at": self.created_at, "finished_at": self.finished_at, "status": self.status,
+            "label": self.label, "progress": self.progress, "total": self.total, "ok": d["ok"], "failed": d["failed"],
+            "request": d["request"], "results": self.results, "error": self.error,
+        }
+
     def to_dict(self, *, with_results: bool = True) -> dict[str, Any]:
         req = self.request
         out: dict[str, Any] = {
@@ -176,6 +190,28 @@ class BacktestJob:
         if with_results:
             out["results"] = self.results
         return out
+
+
+def _iso(value: datetime | None) -> str | None:
+    return value.astimezone(KST).isoformat() if value else None
+
+
+def _row_dict(row: dict[str, Any]) -> dict[str, Any]:
+    """repository.list_backtest_jobs 행 → API 형태."""
+    return {**row, "created_at": _iso(row["created_at"]), "finished_at": _iso(row.get("finished_at"))}
+
+
+def _record_dict(record: Any, *, with_results: bool) -> dict[str, Any]:
+    """BacktestJobRecord → API 형태 (BacktestJob.to_dict 와 같은 키)."""
+    out = {
+        "id": record.id, "label": record.label, "status": record.status, "progress": record.progress,
+        "total": record.total, "created_at": _iso(from_db_time(record.created_at)),
+        "finished_at": _iso(from_db_time(record.finished_at)), "error": record.error, "request": record.request,
+        "ok": record.ok, "failed": record.failed,
+    }
+    if with_results:
+        out["results"] = list(record.results or [])
+    return out
 
 
 def _series_points(series: pd.Series, limit: int = MAX_EQUITY_POINTS) -> list[dict[str, Any]]:
@@ -222,9 +258,13 @@ class BacktestRunner:
         loader: CandleLoader = load_candles,
         save_dir: Path | str | None = None,
         max_jobs: int = MAX_JOBS,
+        repo: Repository | None = None,
+        keep: int = KEEP_JOBS,
     ) -> None:
         self.settings = settings
         self.loader = loader
+        self.repo = repo  # 있으면 작업을 DB 에 남긴다
+        self.keep = keep
         self.save_dir = Path(save_dir) if save_dir else PROJECT_ROOT / "data" / "backtests"
         self.max_jobs = max_jobs
         self.jobs: dict[str, BacktestJob] = {}
@@ -246,15 +286,49 @@ class BacktestRunner:
         job.total = len(request.periods) * len(request.markets)
         self._trim()
         self.jobs[job.id] = job
+        self._persist(job)
+        if self.repo is not None:
+            with contextlib.suppress(Exception):
+                self.repo.trim_backtest_jobs(self.keep)
         job.task = asyncio.create_task(self._run(job), name=f"backtest-{job.id}")
         return job
 
     def get(self, job_id: str) -> BacktestJob | None:
         return self.jobs.get(job_id)
 
+    def get_dict(self, job_id: str) -> dict[str, Any] | None:
+        """메모리(실행 중·최근) → DB 순으로 찾는다. 결과 포함."""
+        job = self.jobs.get(job_id)
+        if job is not None:
+            return job.to_dict()
+        if self.repo is None:
+            return None
+        record = self.repo.load_backtest_job(job_id)
+        return _record_dict(record, with_results=True) if record is not None else None
+
     def list_jobs(self) -> list[dict[str, Any]]:
-        jobs = sorted(self.jobs.values(), key=lambda j: j.created_at, reverse=True)
-        return [j.to_dict(with_results=False) for j in jobs]
+        """DB 목록(서버 재시작 후에도 유지) + 메모리의 실행 중 작업. 결과 본문은 뺀다."""
+        live = {j.id: j.to_dict(with_results=False) for j in self.jobs.values()}
+        if self.repo is None:
+            return sorted(live.values(), key=lambda d: d["created_at"], reverse=True)
+        out: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for row in self.repo.list_backtest_jobs(self.keep):
+            seen.add(row["id"])
+            out.append(live.get(row["id"]) or _row_dict(row))
+        out.extend(d for job_id, d in live.items() if job_id not in seen)
+        out.sort(key=lambda d: d["created_at"], reverse=True)
+        return out
+
+    async def delete(self, job_id: str) -> bool:
+        """실행 중이면 중단하고 메모리·DB 에서 지운다."""
+        found = job_id in self.jobs
+        if found:
+            await self.cancel(job_id)
+            self.jobs.pop(job_id, None)
+        if self.repo is not None:
+            found = self.repo.delete_backtest_job(job_id) or found
+        return found
 
     async def cancel(self, job_id: str) -> bool:
         job = self.jobs.get(job_id)
@@ -278,6 +352,14 @@ class BacktestRunner:
         return job
 
     # ------------------------------------------------------------------
+    def _persist(self, job: BacktestJob) -> None:
+        if self.repo is None:
+            return
+        try:
+            self.repo.save_backtest_job(job.snapshot())
+        except Exception as exc:  # noqa: BLE001 - 기록 실패가 백테스트를 막지 않게
+            log.warning("백테스트 작업 저장 실패 %s: %s", job.id, exc)
+
     def _trim(self) -> None:
         finished = [j for j in self.jobs.values() if j.status not in ("queued", "running")]
         finished.sort(key=lambda j: j.created_at)
@@ -287,6 +369,7 @@ class BacktestRunner:
 
     async def _run(self, job: BacktestJob) -> None:
         job.status = "running"
+        self._persist(job)
         req = job.request
         interval = CandleInterval.parse(req.candle_interval)
         config = req.backtest_config()
@@ -320,6 +403,7 @@ class BacktestRunner:
                         job.results.append({"period": period.label, "market": market, "interval": interval.value,
                                             "error": f"{type(exc).__name__}: {exc}"})
                     job.progress += 1
+                    self._persist(job)
             job.status = "done"
         except asyncio.CancelledError:
             job.status = "cancelled"
@@ -330,3 +414,4 @@ class BacktestRunner:
             job.error = f"{type(exc).__name__}: {exc}"
         finally:
             job.finished_at = datetime.now(UTC)
+            self._persist(job)

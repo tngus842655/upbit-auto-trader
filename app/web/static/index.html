@@ -326,7 +326,9 @@
               <option value="">이전 결과 보기…</option>
               <option v-for="j in bt.jobs" :key="j.id" :value="j.id">{{ fmtTime(j.created_at) }} · {{ j.label }} · {{ btStatusLabel(j.status) }}</option>
             </select>
+            <button v-if="bt.selectedJobId && !btRunning" class="small danger" @click="deleteBacktestJob(bt.selectedJobId)" title="이 결과를 목록과 DB 에서 지웁니다">삭제</button>
           </div>
+          <div class="muted small">결과는 DB 에 저장되어 서버를 다시 시작해도 남습니다 (최근 100개).</div>
           <div v-if="bt.job && btRunning" class="progress"><div class="bar" :style="{ width: btProgressPct + '%' }"></div><span>{{ bt.job.progress }} / {{ bt.job.total }} 완료</span></div>
           <div v-if="bt.error" class="errors">{{ bt.error }}</div>
         </div>
@@ -478,10 +480,23 @@
   <!-- ===================== 로그 ===================== -->
   <main v-show="tab === 'logs'" class="page">
     <div class="card">
-      <h3>이벤트 로그 <label class="inline"><select v-model="logLevel" @change="loadLogs"><option value="">전체</option><option value="INFO">정보</option><option value="WARNING">경고</option><option value="ERROR">오류</option></select></label> <button class="small" @click="loadLogs">새로고침</button></h3>
-      <ul class="loglist">
-        <li v-for="e in logs" :key="e.time + e.event + e.message"><span class="pill" :class="e.level === 'ERROR' ? 'bad' : (e.level === 'WARNING' ? 'warnpill' : 'ok')">{{ levelLabel(e.level) }}</span> {{ fmtTime(e.time) }} <b>{{ eventLabel(e.event) }}</b> {{ e.message }}</li>
-      </ul>
+      <h3>이벤트 로그 <span class="muted small">{{ logs.length }}개 표시{{ logsHasMore ? ' · 아래로 내리면 이전 로그를 더 불러옵니다' : (logs.length ? ' · 끝' : '') }}</span></h3>
+      <div class="row wrap logfilter">
+        <select v-model="logLevel" @change="loadLogs"><option value="">전체 레벨</option><option value="INFO">정보</option><option value="WARNING">경고</option><option value="ERROR">오류</option></select>
+        <input type="date" v-model="logFilter.from" @change="loadLogs" title="시작일">
+        <span class="muted">~</span>
+        <input type="date" v-model="logFilter.to" @change="loadLogs" title="종료일 (포함)">
+        <input v-model.trim="logFilter.q" placeholder="이벤트·메시지 검색" @keyup.enter="loadLogs" style="min-width:170px">
+        <button class="small" @click="loadLogs">조회</button>
+        <button class="small" @click="resetLogFilter">초기화</button>
+      </div>
+      <div class="logscroll" @scroll="onLogScroll">
+        <ul class="loglist">
+          <li v-if="!logs.length" class="muted">조건에 맞는 로그가 없습니다</li>
+          <li v-for="e in logs" :key="e.id"><span class="pill" :class="e.level === 'ERROR' ? 'bad' : (e.level === 'WARNING' ? 'warnpill' : 'ok')">{{ levelLabel(e.level) }}</span> {{ fmtTime(e.time) }} <b>{{ eventLabel(e.event) }}</b> {{ e.message }}</li>
+        </ul>
+        <div class="actions" v-if="logsHasMore"><button class="small" @click="loadMoreLogs" :disabled="logsLoading">{{ logsLoading ? '불러오는 중…' : '이전 100개 더 보기' }}</button></div>
+      </div>
     </div>
   </main>
 </div>

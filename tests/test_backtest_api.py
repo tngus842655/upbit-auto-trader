@@ -13,7 +13,7 @@ from fastapi.testclient import TestClient
 from app.api.backtests import BacktestRequest, BacktestRunner, Period, _series_points, parse_kst
 from app.api.server import create_app
 from app.core.exceptions import MarketDataError
-from app.database import Database
+from app.database import Database, Repository
 from app.exchange.models import KST, CandleInterval
 from app.strategy.data import candles_to_dataframe
 from tests.test_api import FakePublicClient
@@ -106,11 +106,34 @@ async def test_runner_applies_risk_rules(make_settings, tmp_path) -> None:
     assert "stop_loss" in risky.results[0]["exit_reasons"]
 
 
+async def test_jobs_persist_in_db(make_settings, tmp_path) -> None:
+    db = Database("sqlite://")
+    db.create_all()
+    repo = Repository(db, "paper")
+    runner = BacktestRunner(make_settings(), loader=fake_loader, save_dir=tmp_path, repo=repo, keep=2)
+    req = BacktestRequest(markets=["KRW-BTC"], strategy_name="ma_cross", strategy_params=FAST_PARAMS,
+                          periods=[{"label": "a", "start": "2026-01-01"}], save=False)
+    first = await runner.run_sync(req)
+    second = await runner.run_sync(req)
+    third = await runner.run_sync(req)
+    # 새 실행기(서버 재시작 상황)에서도 목록·결과가 보인다
+    fresh = BacktestRunner(make_settings(), loader=fake_loader, save_dir=tmp_path, repo=repo, keep=2)
+    listed = fresh.list_jobs()
+    assert [j["id"] for j in listed][0] == third.id and all("results" not in j for j in listed)
+    got = fresh.get_dict(third.id)
+    assert got and got["status"] == "done" and got["ok"] == 1
+    assert got["results"][0]["metrics"]["total_trades"] > 0 and got["created_at"].endswith("+09:00")
+    assert repo.trim_backtest_jobs(keep=2) == 1 and fresh.get_dict(first.id) is None
+    assert await fresh.delete(second.id) is True and fresh.get_dict(second.id) is None
+    assert await fresh.delete("nope") is False
+    assert repo.count_rows(type(repo.load_backtest_job(third.id))) == 1
+
+
 def test_backtest_api_flow(make_settings, tmp_path) -> None:
     settings = make_settings(paper_fee_rate=0.0007)
     db = Database("sqlite://")
     db.create_all()
-    runner = BacktestRunner(settings, loader=fake_loader, save_dir=tmp_path)
+    runner = BacktestRunner(settings, loader=fake_loader, save_dir=tmp_path, repo=Repository(db, "paper"))
     app = create_app(settings, db=db, public_client=FakePublicClient({}), backtests=runner)
     with TestClient(app) as client:
         defaults = client.get("/api/backtest/defaults").json()
@@ -140,6 +163,12 @@ def test_backtest_api_flow(make_settings, tmp_path) -> None:
             time.sleep(0.1)
         assert body and body["status"] == "done", body
         assert body["results"][0]["metrics"]["total_trades"] > 0 and body["results"][0]["fee_rate"] == 0.0007
-        assert client.get("/api/backtest/jobs").json()[0]["id"] == job_id
-        assert client.delete(f"/api/backtest/jobs/{job_id}").json()["cancelled"] is True
+        listed = client.get("/api/backtest/jobs").json()
+        assert listed[0]["id"] == job_id and listed[0]["ok"] == 1 and "results" not in listed[0]
+        # DB 에 남아 있어 새 실행기(서버 재시작)에서도 같은 결과가 보인다
+        fresh = BacktestRunner(settings, loader=fake_loader, save_dir=tmp_path, repo=Repository(db, "paper"))
+        assert fresh.get_dict(job_id)["results"][0]["metrics"]["total_trades"] > 0
+        assert client.post("/api/backtest/jobs/nope/cancel").status_code == 404
+        assert client.delete(f"/api/backtest/jobs/{job_id}").json()["deleted"] is True
+        assert client.get(f"/api/backtest/jobs/{job_id}").status_code == 404
         assert client.delete("/api/backtest/jobs/nope").status_code == 404

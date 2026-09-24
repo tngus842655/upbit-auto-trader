@@ -43,6 +43,7 @@
           { id: "pockets", label: "포켓 · 자산 이전" }, { id: "logs", label: "로그" },
         ],
         status: {}, balance: {}, perf: {}, recent: {}, latestSignal: null, logs: [], logLevel: "",
+        logFilter: { from: "", to: "", q: "" }, logsHasMore: false, logsLoading: false,
         meta: { available: {}, schemas: {}, intervals: [], risk_schema: {} },
         settingsVersion: 0, settingsHistory: [], form: null, saving: false, saveResult: null, formErrors: [],
         pockets: {}, transfer: { direction: "to_main", amount: 0, bot_pocket_uuid: null }, transferResult: null,
@@ -302,6 +303,7 @@
           this.bt.years = years;
           this.bt.capital = d.initial_capital; this.bt.feePct = +(d.fee_rate * 100).toFixed(4); this.bt.slippagePct = +(d.slippage_rate * 100).toFixed(4);
           this.bt.jobs = await this.api("/api/backtest/jobs");
+          if (!this.bt.job && this.bt.jobs.length) this.loadBacktestJob(this.bt.jobs[0].id);  // 마지막 결과를 바로 보여준다
         } catch (e) { /* noop */ }
       },
       syncBacktestFromSettings() {
@@ -341,12 +343,22 @@
       },
       async cancelBacktest() {
         if (!this.bt.job) return;
-        try { await this.api(`/api/backtest/jobs/${this.bt.job.id}`, { method: "DELETE" }); } catch (e) { this.notify("중단 실패: " + e.message, "bad"); }
+        try { await this.api(`/api/backtest/jobs/${this.bt.job.id}/cancel`, { method: "POST", body: {} }); } catch (e) { this.notify("중단 실패: " + e.message, "bad"); }
+      },
+      async deleteBacktestJob(id) {
+        if (!confirm("이 백테스트 결과를 삭제합니다. 계속할까요?")) return;
+        try {
+          await this.api(`/api/backtest/jobs/${id}`, { method: "DELETE" });
+          this.bt.jobs = await this.api("/api/backtest/jobs");
+          if (this.bt.job && this.bt.job.id === id) { this.bt.job = null; this.bt.selected = null; }
+          this.bt.selectedJobId = "";
+          this.notify("백테스트 결과를 삭제했습니다", "ok");
+        } catch (e) { this.notify("삭제 실패: " + e.message, "bad"); }
       },
       async loadBacktestJob(id) {
         if (!id) return;
         try {
-          this.bt.job = await this.api(`/api/backtest/jobs/${id}`); this.bt.selected = null;
+          this.bt.job = await this.api(`/api/backtest/jobs/${id}`); this.bt.selected = null; this.bt.selectedJobId = id;
           this.selectBtResult(this.bt.job.results.findIndex((r) => !r.error));
           if (this.btRunning) this.pollBacktest(id);
         } catch (e) { this.notify("결과 조회 실패: " + e.message, "bad"); }
@@ -371,7 +383,34 @@
         try { this.transferResult = await this.api("/api/pockets/transfer", { method: "POST", body: { direction: this.transfer.direction, amount: this.transfer.amount, currency: "KRW", bot_pocket_uuid: this.transfer.bot_pocket_uuid } }); this.notify("이전 요청 접수", "ok"); setTimeout(() => this.loadPockets(), 2000); }
         catch (e) { this.notify("이전 실패: " + e.message, "bad"); }
       },
-      async loadLogs() { try { this.logs = await this.api(`/api/logs?limit=200${this.logLevel ? "&level=" + this.logLevel : ""}`); } catch (e) { this.notify("로그 조회 실패: " + e.message, "bad"); } },
+      // ---------- 로그: 최근 100개 + 이전 페이지(before_id) + 날짜·레벨·검색 필터
+      logQuery(beforeId) {
+        const p = new URLSearchParams({ limit: "100" });
+        if (this.logLevel) p.set("level", this.logLevel);
+        if (this.logFilter.from) p.set("date_from", this.logFilter.from);
+        if (this.logFilter.to) p.set("date_to", this.logFilter.to);
+        if (this.logFilter.q) p.set("q", this.logFilter.q);
+        if (beforeId) p.set("before_id", String(beforeId));
+        return `/api/logs?${p.toString()}`;
+      },
+      logFilterActive() { return !!(this.logFilter.from || this.logFilter.to || this.logFilter.q); },
+      async loadLogs() {
+        this.logsLoading = true;
+        try { const r = await this.api(this.logQuery()); this.logs = r.items; this.logsHasMore = r.has_more; }
+        catch (e) { this.notify("로그 조회 실패: " + e.message, "bad"); }
+        this.logsLoading = false;
+      },
+      async loadMoreLogs() {
+        if (this.logsLoading || !this.logsHasMore || !this.logs.length) return;
+        this.logsLoading = true;
+        try {
+          const r = await this.api(this.logQuery(this.logs[this.logs.length - 1].id));
+          this.logs = this.logs.concat(r.items); this.logsHasMore = r.has_more;
+        } catch (e) { this.notify("로그 조회 실패: " + e.message, "bad"); }
+        this.logsLoading = false;
+      },
+      onLogScroll(ev) { const el = ev.target; if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) this.loadMoreLogs(); },
+      resetLogFilter() { this.logFilter = { from: "", to: "", q: "" }; this.logLevel = ""; this.loadLogs(); },
       // ---------- 실시간
       connectWs() {
         if (this.ws) { try { this.ws.close(); } catch (e) { /* noop */ } this.ws = null; }
@@ -402,7 +441,8 @@
     mounted() {
       this.loadAll(); this.connectWs(); this.loadLogs(); this.loadPockets();
       this.timers.push(setInterval(() => this.refreshLight(), 15000));
-      this.timers.push(setInterval(() => { if (this.tab === "logs") this.loadLogs(); }, 15000));
+      // 로그 자동 갱신은 첫 페이지·필터 없음일 때만 (더 보기로 내려간 상태를 덮어쓰지 않도록)
+      this.timers.push(setInterval(() => { if (this.tab === "logs" && this.logs.length <= 100 && !this.logFilterActive()) this.loadLogs(); }, 15000));
     },
   }).mount("#app");
 })();

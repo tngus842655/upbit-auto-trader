@@ -11,7 +11,7 @@ from app.api import server as server_module
 from app.api.server import create_app
 from app.api.services import DashboardService
 from app.database import Database, Repository
-from app.exchange.models import Market, Ticker
+from app.exchange.models import KST, Market, Ticker
 from app.strategy.base import Action, Signal
 from app.trading.portfolio import Portfolio
 from tests.test_models import TICKER_JSON
@@ -105,8 +105,26 @@ def test_balance_performance_recent(api) -> None:
     assert recent["signals"][0]["action"] == "BUY" and recent["signals"][0]["indicators"] == {"rsi": 40.0}
     assert [e["event"] for e in recent["errors"]] == ["api_error"]
     assert client.get("/api/positions").json()[0]["market"] == "KRW-BTC"
-    assert client.get("/api/logs?level=ERROR").json()[0]["event"] == "api_error"
+    assert client.get("/api/logs?level=ERROR").json()["items"][0]["event"] == "api_error"
     assert client.get("/api/signals").json()[0]["market"] == "KRW-BTC"
+
+
+def test_logs_paging_and_filters(api) -> None:
+    client, repo, _, _ = api
+    for i in range(250):
+        repo.log("INFO" if i % 10 else "ERROR", f"evt{i % 3}", f"메시지 {i}")
+    page = client.get("/api/logs").json()
+    assert len(page["items"]) == 100 and page["has_more"] is True and page["items"][0]["message"] == "메시지 249"
+    page2 = client.get(f"/api/logs?before_id={page['next_before_id']}").json()
+    assert page2["items"][0]["message"] == "메시지 149" and page2["has_more"] is True
+    page3 = client.get(f"/api/logs?before_id={page2['next_before_id']}").json()
+    assert len(page3["items"]) == 50 and page3["has_more"] is False and page3["items"][-1]["message"] == "메시지 0"
+    assert all(e["level"] == "ERROR" for e in client.get("/api/logs?level=ERROR").json()["items"])
+    assert len(client.get("/api/logs?q=메시지 24").json()["items"]) == 11  # 24, 240~249
+    today = datetime.now(KST).date().isoformat()
+    assert len(client.get(f"/api/logs?date_from={today}&date_to={today}&limit=500").json()["items"]) == 250
+    assert client.get("/api/logs?date_from=2026-01-01&date_to=2026-01-02").json()["items"] == []
+    assert client.get("/api/logs?date_from=bad").status_code == 422
 
 
 def test_strategy_meta_and_settings_roundtrip(api) -> None:
