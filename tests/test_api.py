@@ -192,6 +192,9 @@ def test_commands_and_start(api, monkeypatch) -> None:
     )
     r = client.post("/api/bot/start", json={})
     assert r.status_code == 200 and r.json()["pid"] == 4242 and started["pid"] == 4242
+    # 시작 요청 직후 STARTING 하트비트가 기록되어 연타는 409 (감사 HIGH-7)
+    assert repo.read_engine_status().status == "STARTING"
+    assert client.post("/api/bot/start", json={}).status_code == 409
 
     # 하트비트가 살아 있으면 중복 시작 거부
     repo.write_engine_status(status="RUNNING", pid=4242)

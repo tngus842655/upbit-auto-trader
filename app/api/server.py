@@ -345,6 +345,9 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
         elif settings.trading_mode is TradingMode.LIVE:
             # .env 가 LIVE 여도 대시보드에서 paper 를 고르면 PAPER 로 띄운다 (start_engine 이 TRADING_MODE 를 덮어씀)
             pass
+        # 시작 요청을 STARTING 하트비트로 먼저 남겨 연타·동시 요청은 409 가 되게 한다
+        # (엔진이 곧 자기 하트비트로 덮어쓴다)
+        repo.write_engine_status(status="STARTING", pid=None, message="대시보드 시작 요청")
         pid = start_engine(settings, mode, confirm_live=confirm)
         repo.log("INFO", "dashboard_start", f"대시보드에서 엔진 시작 요청 (pid {pid})", {"mode": mode})
         return {"started": True, "pid": pid, "mode": mode}

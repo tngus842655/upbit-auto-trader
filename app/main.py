@@ -47,6 +47,7 @@ from app.risk.state_store import RepositoryRiskStateStore
 from app.strategy import check_no_lookahead, create_strategy
 from app.strategy.data import candles_to_dataframe, detect_price_anomalies, drop_unclosed, validate_candles
 from app.trading.engine import TradingEngine
+from app.trading.instance_lock import InstanceLock
 from app.trading.live_broker import LiveBroker, portfolio_from_accounts
 from app.trading.live_guard import LIVE_CONFIRM_PHRASE
 from app.trading.orders import PaperBroker
@@ -315,6 +316,12 @@ async def build_live_components(settings: Settings, client: UpbitClient, markets
     return db, repo, portfolio, broker, risk, account_record is not None
 
 
+def acquire_engine_lock(mode: str, base_dir: Path | None = None) -> InstanceLock | None:
+    """같은 모드의 엔진이 이미 떠 있으면 None (감사 HIGH-7). 잠금 파일: data/engine-{mode}.lock"""
+    lock = InstanceLock((base_dir or PROJECT_ROOT / "data") / f"engine-{mode}.lock")
+    return lock if lock.acquire() else None
+
+
 async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
     """매매 루프. PAPER 는 가상 체결, LIVE 는 이중 플래그 + --confirm-live 가 모두 있어야 실제 주문."""
     if settings.trading_mode is TradingMode.BACKTEST:
@@ -338,6 +345,12 @@ async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
             return 2
         print("!!! LIVE 모드: 실제 자금이 거래됩니다. 소액으로 시작하고 status/로그를 계속 확인하세요 !!!")
 
+    lock = acquire_engine_lock("live" if live else "paper")
+    if lock is None:
+        holder = InstanceLock(PROJECT_ROOT / "data" / f"engine-{'live' if live else 'paper'}.lock").holder()
+        print(f"같은 모드의 엔진이 이미 실행 중입니다 (pid·시작시각: {holder or '알 수 없음'}). 먼저 정지하세요.",
+              file=sys.stderr)
+        return 3
     try:
         async with UpbitClient.from_settings(settings) as client:
             mode = "live" if live else "paper"
@@ -400,6 +413,8 @@ async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
     except ConfigError as exc:
         print(f"설정 오류: {exc}", file=sys.stderr)
         return 2
+    finally:
+        lock.release()
     print(f"=== {'실거래' if live else '모의매매'} 종료 ===")
     for key, value in stats.__dict__.items():
         if key != "extra":
