@@ -23,6 +23,7 @@ from typing import Any
 from app.exchange.models import KST
 from app.risk.base import RiskDecision
 from app.risk.config import RiskConfig
+from app.risk.state_store import RiskStateStore, default_risk_store
 from app.strategy.base import Action, Signal
 from app.trading.market_state import PriceState
 from app.trading.portfolio import Portfolio, Position, Trade
@@ -49,10 +50,19 @@ class RiskState:
     daily_realized_pnl: float = 0.0
     consecutive_losses: int = 0
     lock_reason: str | None = None  # 당일 신규 진입 잠금 사유
+    lock_kind: str | None = None  # "daily"(일일 손실) / "consecutive"(연속 손실) — 재시작 복구 시 구분용
     halted: bool = False
     halt_reason: str | None = None
     peak_prices: dict[str, float] = field(default_factory=dict)  # 추적 손절용 보유 중 최고가
     last_exit_at: dict[str, datetime] = field(default_factory=dict)
+
+    def to_persist_dict(self) -> dict[str, Any]:
+        """저장소용 — 재시작 뒤 복구할 값 전부 (JSON 직렬화 가능)."""
+        return {
+            **self.to_dict(),
+            "last_exit_at": {m: t.isoformat() for m, t in self.last_exit_at.items()},
+            "peak_prices": dict(self.peak_prices),
+        }
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -62,15 +72,27 @@ class RiskState:
             "daily_realized_pnl": self.daily_realized_pnl,
             "consecutive_losses": self.consecutive_losses,
             "lock_reason": self.lock_reason,
+            "lock_kind": self.lock_kind,
             "halted": self.halted,
             "halt_reason": self.halt_reason,
         }
 
 
 class RiskManager:
-    def __init__(self, config: RiskConfig | None = None) -> None:
+    """진입 심사·청산 감시·일일 한도. 상태 전이(당일 시작·잠금·긴급 정지·거래 반영)는 ``store`` 에 저장되어
+    재시작(``rebuild``) 때 복구된다 (감사 HIGH-3). 기본 저장소는 프로세스 전역 메모리, 엔진은 DB 저장소를 넘긴다.
+    """
+
+    def __init__(self, config: RiskConfig | None = None, store: RiskStateStore | None = None) -> None:
         self.config = config or RiskConfig()
         self.state = RiskState()
+        self.store: RiskStateStore = store if store is not None else default_risk_store()
+
+    def _persist(self) -> None:
+        try:
+            self.store.save(self.state.to_persist_dict())
+        except Exception as exc:  # noqa: BLE001 - 저장 실패가 리스크 판단을 멈추지 않게
+            log.warning("리스크 상태 저장 실패: %s", exc)
 
     # ------------------------------------------------------------------
     # 날짜·자산 추적
@@ -92,6 +114,8 @@ class RiskManager:
         self.state.daily_realized_pnl = 0.0
         self.state.consecutive_losses = 0
         self.state.lock_reason = None
+        self.state.lock_kind = None
+        self._persist()
         return True
 
     def update_equity(self, equity: float, now: datetime) -> str | None:
@@ -108,7 +132,9 @@ class RiskManager:
                     f"일일 손실 한도 초과: 당일 시작 {self.state.day_start_equity:,.0f} → 현재 {equity:,.0f} "
                     f"({drawdown * 100:.2f}% ≥ {limit * 100:g}%)"
                 )
+                self.state.lock_kind = "daily"
                 log.warning("리스크 잠금: %s", self.state.lock_reason)
+                self._persist()
                 return self.state.lock_reason
         return None
 
@@ -123,29 +149,71 @@ class RiskManager:
         limit = self.config.max_consecutive_losses
         if limit is not None and self.state.consecutive_losses >= limit and self.state.lock_reason is None:
             self.state.lock_reason = f"연속 손실 {self.state.consecutive_losses}회 ≥ 한도 {limit}회"
+            self.state.lock_kind = "consecutive"
             log.warning("리스크 잠금: %s", self.state.lock_reason)
+            self._persist()
             return self.state.lock_reason
+        self._persist()
         return None
 
     def rebuild(self, trades: Iterable[Trade], now: datetime, equity: float | None) -> None:
-        """재시작 시 오늘(KST) 청산된 거래를 다시 반영한다."""
+        """재시작 시 저장소 상태(당일 시작 자산·잠금·긴급 정지·재진입 시각)를 복구하고 오늘 청산 거래를 다시 반영한다.
+
+        - 저장된 날짜가 오늘이면 day_start_equity 는 저장값(재시작 시점 자산이 아니라 당일 시작 자산), 잠금 사유도 복구.
+        - 긴급 정지(halt)는 날짜와 무관하게 resume 전까지 유지된다.
+        - 연속 손실·당일 실현손익은 DB 의 오늘 거래를 다시 세어 만든다 (이중 반영 방지).
+        """
+        try:
+            saved = self.store.load() or {}
+        except Exception as exc:  # noqa: BLE001 - 복구 실패는 빈 상태로 시작 (매매를 막지 않음)
+            log.warning("리스크 상태 복구 실패: %s", exc)
+            saved = {}
         self.state = RiskState()
-        self.start_day_if_needed(now, equity)
         today = self.trading_day(now)
+        same_day = saved.get("day") == today.isoformat()
+        self.state.day = today
+        self.state.day_start_equity = saved.get("day_start_equity") if same_day else None
+        if self.state.day_start_equity is None:
+            self.state.day_start_equity = equity
+        if same_day and saved.get("lock_kind") == "daily":
+            # 일일 손실 잠금은 거래 재반영으로 재현되지 않으므로 저장값을 쓴다.
+            # 연속 손실 잠금은 아래 거래 재반영이 다시 계산한다.
+            self.state.lock_reason = saved.get("lock_reason")
+            self.state.lock_kind = "daily"
+        if same_day:
+            for market, stamp in (saved.get("last_exit_at") or {}).items():
+                try:
+                    self.state.last_exit_at[market] = datetime.fromisoformat(stamp)
+                except (TypeError, ValueError):
+                    continue
+        if saved.get("halted"):
+            self.state.halted = True
+            self.state.halt_reason = saved.get("halt_reason")
+        replay_lock, replay_kind = self.state.lock_reason, self.state.lock_kind
+        self.state.lock_reason = None
+        self.state.lock_kind = None
         for trade in sorted(trades, key=lambda t: t.exit_time):
             if self.trading_day(trade.exit_time) == today:
                 self.record_trade(trade, trade.exit_time)
+        if self.state.lock_reason is None and replay_lock:
+            self.state.lock_reason, self.state.lock_kind = replay_lock, replay_kind
         if equity is not None:
             self.state.last_equity = equity
+        if saved:
+            log.info("리스크 상태 복구: day_start=%s, 잠금=%s, 긴급정지=%s", self.state.day_start_equity,
+                     self.state.lock_reason, self.state.halted)
+        self._persist()
 
     def halt(self, reason: str) -> None:
         self.state.halted = True
         self.state.halt_reason = reason
         log.error("리스크 긴급 정지: %s", reason)
+        self._persist()
 
     def resume(self) -> None:
         self.state.halted = False
         self.state.halt_reason = None
+        self._persist()
 
     @property
     def entries_blocked_reason(self) -> str | None:

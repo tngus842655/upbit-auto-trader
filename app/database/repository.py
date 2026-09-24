@@ -24,6 +24,7 @@ from app.database.models import (
     FillRecord,
     OrderRecord,
     PositionRecord,
+    RiskStateRecord,
     RoundTripRecord,
     SignalRecord,
     from_db_time,
@@ -391,6 +392,18 @@ class Repository:
         with self.db.session() as s:
             stmt = select(CandleRecord.time).where(CandleRecord.market == market, CandleRecord.interval == interval)
             return [from_db_time(t) for t in s.execute(stmt.order_by(CandleRecord.time)).scalars()]
+
+    # ------------------------------------------------------------------
+    # 리스크 상태 (모드별 1행)
+    # ------------------------------------------------------------------
+    def save_risk_state(self, data: dict[str, Any]) -> None:
+        with self.db.session() as s:
+            s.merge(RiskStateRecord(mode=self.mode, data=dict(data), updated_at=datetime.now(UTC).replace(tzinfo=None)))
+
+    def load_risk_state(self) -> dict[str, Any] | None:
+        with self.db.session() as s:
+            record = s.get(RiskStateRecord, self.mode)
+            return dict(record.data) if record is not None and record.data else None
 
     # ------------------------------------------------------------------
     # 백테스트 작업 기록 (대시보드, 모드와 무관)

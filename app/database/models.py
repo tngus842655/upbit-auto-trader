@@ -248,6 +248,16 @@ class BotSettingsRecord(Base):
     __table_args__ = (UniqueConstraint("mode", "version", name="uq_bot_settings_version"),)
 
 
+class RiskStateRecord(Base):
+    """리스크 상태 스냅샷(모드별 1행) — 당일 시작 자산·잠금·긴급 정지를 재시작 뒤 복구한다 (감사 HIGH-3)."""
+
+    __tablename__ = "risk_state"
+
+    mode: Mapped[str] = mapped_column(String(10), primary_key=True)
+    data: Mapped[dict[str, Any]] = mapped_column(JSON)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive)
+
+
 class BacktestJobRecord(Base):
     """대시보드 백테스트 작업 기록 — 서버를 재시작해도 이전 결과를 다시 볼 수 있다 (모드와 무관)."""
 

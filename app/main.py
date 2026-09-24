@@ -43,6 +43,7 @@ from app.exchange.websocket import Subscription, UpbitWebSocket
 from app.exchange.ws_models import WsCandle, WsMessage, WsOrderbook, WsTicker, WsTrade
 from app.notify import EventKind, NotificationEvent, NotifyError, build_notification_manager, discover_chats, get_me
 from app.risk import RiskConfig, RiskManager
+from app.risk.state_store import RepositoryRiskStateStore
 from app.strategy import check_no_lookahead, create_strategy
 from app.strategy.data import candles_to_dataframe, detect_price_anomalies, drop_unclosed, validate_candles
 from app.trading.engine import TradingEngine
@@ -360,7 +361,7 @@ async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
                 db, repo, portfolio, broker, risk, restored = await build_live_components(settings, client, markets)
             else:
                 db, repo, portfolio, broker, risk, restored = build_paper_components(settings)
-            risk = RiskManager(runtime.risk)
+            risk = RiskManager(runtime.risk, store=RepositoryRiskStateStore(repo))  # 재시작해도 잠금·긴급 정지 유지
             try:
                 override_note = ", CLI 값으로 일부 덮어씀" if overrides else ""
                 print(f"  실행 설정 v{version} (DB bot_settings{override_note})")

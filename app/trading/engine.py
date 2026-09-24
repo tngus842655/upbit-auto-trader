@@ -208,6 +208,9 @@ class TradingEngine:
         self.risk.rebuild(trades, now, equity)
         if self.risk.entries_blocked_reason:
             log.warning("리스크 상태 복구: 신규 진입 차단 중 — %s", self.risk.entries_blocked_reason)
+            self.repo.log("WARNING", "risk_lock_restored", self.risk.entries_blocked_reason,
+                          self.risk.snapshot()["state"])
+            self._notify(EventKind.RISK_HALT, "재시작 후 신규 진입 차단 상태", self.risk.entries_blocked_reason)
         log.info("리스크 상태 복구: 오늘 거래 %d건, 연속손실 %d, 실현손익 %.0f", len(trades),
                  self.risk.state.consecutive_losses, self.risk.state.daily_realized_pnl)
 

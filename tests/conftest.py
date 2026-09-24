@@ -21,6 +21,14 @@ TEST_SECRET_KEY = "test-secret-key-abcdefghijklmnopqrstuvwxyz"
 
 
 @pytest.fixture(autouse=True)
+def _reset_default_risk_store() -> None:
+    """RiskManager 의 프로세스 전역 메모리 저장소가 테스트 사이에 새지 않게 비운다."""
+    from app.risk.state_store import default_risk_store
+
+    default_risk_store().clear()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """개발자 PC 의 실제 환경변수가 테스트에 스며들지 않도록 제거한다."""
     for name in (
