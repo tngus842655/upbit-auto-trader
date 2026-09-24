@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from app.exchange.models import CandleInterval
 from app.trading.market_state import MarketState, PriceState
 from tests.test_engine import MARKET, T0, Harness
@@ -48,7 +50,8 @@ async def test_engine_stop_loss_uses_rest_price_when_book_is_stale(make_settings
     h.engine.state.set_last_price(MARKET, 80.0, h.now)  # REST 보정
     price = h.engine.state.price(MARKET)
     assert price.is_fresh(h.now, 30) and price.mark_price == 80.0
-    assert h.engine.current_equity() < 1_000_000 * 0.8  # 평가액도 체결가 기준
+    pos = h.portfolio.position(MARKET)
+    assert h.engine.current_equity() == pytest.approx(h.portfolio.cash + pos.quantity * 80.0)  # 평가액도 체결가 기준
     orders = await h.engine.check_exits(h.now, force=True)
     assert len(orders) == 1 and orders[0].is_filled and orders[0].reason.startswith("stop_loss")
     assert not h.portfolio.has_position(MARKET)
