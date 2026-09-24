@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pandas as pd
 
@@ -83,6 +83,19 @@ class MarketState:
         merged.attrs["interval"] = self.interval.value
         self.candles[market] = merged
         return [t.to_pydatetime() for t in sorted(new_times)]
+
+    def find_gaps(self, market: str) -> list[tuple[datetime, datetime]]:
+        """닫힌 캔들 사이에 빠진 구간 (앞 캔들 시각, 뒤 캔들 시각). 길이가 일정한 캔들만 검사한다 (1w/1M/1y 제외)."""
+        df = self.candles.get(market)
+        if df is None or len(df) < 2 or self.interval.value in ("1w", "1M", "1y"):
+            return []
+        step = timedelta(seconds=self.interval.seconds)
+        idx = df.index
+        return [
+            (idx[i].to_pydatetime(), idx[i + 1].to_pydatetime())
+            for i in range(len(idx) - 1)
+            if idx[i + 1] - idx[i] > step
+        ]
 
     def frame(self, market: str) -> pd.DataFrame | None:
         return self.candles.get(market)

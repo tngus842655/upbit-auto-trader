@@ -81,6 +81,7 @@ class EngineStats:
     orders_unknown: int = 0  # 거래소 생성 여부 미확인 (운영자 확인 필요)
     orders_resolved: int = 0  # 미확정 주문을 후속 조회로 확정한 수
     price_stream_restarts: int = 0  # 시세 스트림 재연결 횟수
+    stale_signals_skipped: int = 0  # 정체 뒤 실행하지 않고 기록만 한 오래된 신호
     risk_rejections: int = 0
     exits_triggered: int = 0
     risk_locks: int = 0
@@ -234,7 +235,12 @@ class TradingEngine:
     # 캔들 처리
     # ------------------------------------------------------------------
     async def process_closed_candles(self, now: datetime | None = None) -> list[Signal]:
-        """최근 캔들을 다시 받아 새로 닫힌 캔들마다 전략을 돌린다. 만든 신호 목록을 돌려준다."""
+        """최근 캔들을 다시 받아 새로 닫힌 캔들마다 전략을 돌린다. 만든 신호 목록을 돌려준다.
+
+        정체(장애·정지) 뒤 여러 캔들이 한꺼번에 닫혔으면 **마지막 캔들의 신호만 실행**하고 이전 캔들 신호는
+        기록만 남긴다. 마지막 캔들도 현재보다 한 인터벌 넘게 오래됐으면 실행하지 않는다.
+        캔들 공백이 보이면 다시 받아 메운다. (감사 HIGH-4)
+        """
         now = now or self.clock()
         self.stats.candle_checks += 1
         self.stats.last_candle_check = now
@@ -251,16 +257,63 @@ class TradingEngine:
             new_times = self.state.merge_candles(market, candles, now)
             if not new_times:
                 continue
+            gaps = self.state.find_gaps(market)
+            if gaps:
+                new_times = await self._refill_gaps(market, gaps, new_times, now)
             df = self.state.frame(market)
             assert df is not None
             self.repo.save_candles(market, self.interval.value, df.loc[df.index.isin(new_times)])
+            last_time = new_times[-1]
             for closed_time in new_times:
                 self.stats.closed_candles += 1
                 window = df.loc[:closed_time]
                 signal = self.strategy.generate_signal(window, market=market)
                 produced.append(signal)
+                if closed_time != last_time:
+                    self._skip_stale_signal(signal, "정체 뒤 한꺼번에 닫힌 캔들 (마지막 캔들 신호만 실행)")
+                    continue
+                closed_at = closed_time + timedelta(seconds=self.interval.seconds)
+                late = (now - closed_at).total_seconds()
+                if late > self.interval.seconds + self.settings.candle_grace_seconds:
+                    self._skip_stale_signal(signal, f"신호 캔들이 닫힌 지 {late:.0f}초 지남 (한 인터벌 초과)")
+                    continue
                 await self._on_signal(signal, now)
         return produced
+
+    def _skip_stale_signal(self, signal: Signal, why: str) -> None:
+        """오래된 신호는 처리된 것으로 기록만 하고(재시작 후에도 실행되지 않게) 주문하지 않는다."""
+        self.stats.signals += 1
+        self.stats.stale_signals_skipped += 1
+        self.repo.save_signal(signal, self.interval.value)
+        log.warning("오래된 신호 건너뜀 %s %s [%s]: %s", signal.market, signal.time.isoformat(),
+                    signal.action.value, why)
+        if signal.is_actionable:
+            self.repo.log("WARNING", "stale_signal_skipped",
+                          f"{signal.market} {signal.action.value} @ {signal.time.isoformat()}: {why}", signal.to_dict())
+
+    async def _refill_gaps(
+        self, market: str, gaps: list[tuple[datetime, datetime]], new_times: list[datetime], now: datetime
+    ) -> list[datetime]:
+        """캔들 공백을 발견하면 공백 시작부터 지금까지를 덮을 만큼 다시 받아 합친다.
+
+        새로 닫힌 캔들 목록을 갱신해 돌려준다.
+        """
+        first_gap = gaps[0]
+        span = int((now - first_gap[0]).total_seconds() // self.interval.seconds) + 2
+        count = min(self.state.max_rows, max(self.warmup_candles + 1, span))
+        log.warning("%s 캔들 공백 %d곳 (%s → %s) → %d개 다시 조회", market, len(gaps),
+                    first_gap[0].isoformat(), first_gap[1].isoformat(), count)
+        self.repo.log("WARNING", "candle_gap",
+                      f"{market}: 공백 {len(gaps)}곳 ({first_gap[0].isoformat()} → {first_gap[1].isoformat()}), "
+                      f"{count}개 재조회")
+        try:
+            candles = await self._fetch_candles(market, count)
+        except TraderError as exc:
+            self.stats.errors += 1
+            log.error("%s 공백 메우기 실패: %s", market, exc)
+            return new_times
+        more = self.state.merge_candles(market, candles, now)
+        return sorted(set(new_times) | set(more))
 
     async def _on_signal(self, signal: Signal, now: datetime) -> None:
         self.stats.signals += 1
@@ -886,6 +939,7 @@ class TradingEngine:
             "actionable_signals": s.actionable_signals, "orders_filled": s.orders_filled,
             "orders_rejected": s.orders_rejected, "orders_unknown": s.orders_unknown,
             "orders_resolved": s.orders_resolved, "price_stream_restarts": s.price_stream_restarts,
+            "stale_signals_skipped": s.stale_signals_skipped,
             "risk_rejections": s.risk_rejections,
             "snapshots": s.snapshots, "price_updates": s.price_updates, "errors": s.errors,
             "exits_triggered": s.exits_triggered, "risk_locks": s.risk_locks, "last_equity": s.last_equity,
