@@ -63,7 +63,9 @@ class DashboardService:
         self.settings = settings
         self.db = db
         self.prices = PriceCache(public_client)
+        self.public_client = public_client
         self._repos: dict[str, Repository] = {}
+        self._market_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def repo(self, mode: str) -> Repository:
         if mode not in ("paper", "live"):
@@ -71,6 +73,45 @@ class DashboardService:
         if mode not in self._repos:
             self._repos[mode] = Repository(self.db, mode=mode)
         return self._repos[mode]
+
+    # ------------------------------------------------------------------
+    # 마켓 카탈로그 (설정 탭의 코인 선택 팝업)
+    # ------------------------------------------------------------------
+    MARKET_CACHE_SECONDS = 60.0
+
+    async def markets(self, quote: str = "KRW", *, force: bool = False) -> dict[str, Any]:
+        """거래 가능한 페어 목록 + 현재가·24시간 등락률·거래대금·유의/주의 표시. 60초 캐시.
+
+        시가총액은 업비트 공개 API 가 제공하지 않으므로 24시간 거래대금(유동성)을 대신 보여준다.
+        """
+        quote = quote.upper()
+        now = time.monotonic()
+        cached = self._market_cache.get(quote)
+        if cached is not None and not force and now - cached[0] < self.MARKET_CACHE_SECONDS:
+            return cached[1]
+        pairs = [m for m in await self.public_client.get_markets(is_details=True) if m.quote_currency == quote]
+        tickers = {t.market: t for t in await self.public_client.get_quote_tickers(quote)} if pairs else {}
+        items: list[dict[str, Any]] = []
+        for m in pairs:
+            t = tickers.get(m.market)
+            event = m.market_event or {}
+            caution = event.get("caution") or {}
+            items.append({
+                "market": m.market, "base": m.base_currency, "korean_name": m.korean_name,
+                "english_name": m.english_name,
+                "trade_price": t.trade_price if t else None,
+                "change_rate": t.signed_change_rate if t else None,
+                "acc_trade_price_24h": t.acc_trade_price_24h if t else None,
+                "acc_trade_volume_24h": t.acc_trade_volume_24h if t else None,
+                "warning": bool(event.get("warning")),
+                "caution": sorted(k for k, v in caution.items() if v) if isinstance(caution, dict) else [],
+            })
+        items.sort(key=lambda r: r["acc_trade_price_24h"] or 0.0, reverse=True)
+        result = {
+            "quote": quote, "count": len(items), "fetched_at": datetime.now(KST).isoformat(), "items": items,
+        }
+        self._market_cache[quote] = (now, result)
+        return result
 
     # ------------------------------------------------------------------
     def status(self, mode: str) -> dict[str, Any]:

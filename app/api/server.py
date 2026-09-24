@@ -122,6 +122,16 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
             for e in repo.recent_logs(limit, level=level)
         ]
 
+    @app.get("/api/markets")
+    async def api_markets(
+        quote: str = Query("KRW", pattern="^[A-Za-z]{3,5}$"), refresh: bool = False
+    ) -> dict[str, Any]:
+        """거래 가능한 코인 목록(설정 탭 코인 선택 팝업). 공개 API 만 사용, 60초 캐시."""
+        try:
+            return await service.markets(quote, force=refresh)
+        except TraderError as exc:
+            raise HTTPException(status_code=502, detail=describe_api_error(exc)) from exc
+
     # ------------------------------------------------------------------ 전략 · 설정
     def _current_runtime(mode: str) -> tuple[RuntimeSettings, int]:
         repo = service.repo(mode)

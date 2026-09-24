@@ -179,6 +179,14 @@ class UpbitClient:
         data = await self._request("GET", "/v1/ticker", params={"markets": ",".join(codes)})
         return self._parse_list(Ticker, data)
 
+    async def get_quote_tickers(self, quote_currencies: Sequence[str] | str = "KRW") -> list[Ticker]:
+        """마켓(호가 통화) 단위 현재가 조회 ``GET /v1/ticker/all?quote_currencies=KRW``
+        (https://docs.upbit.com/kr/reference/list-quote-tickers). 해당 마켓의 모든 페어를 한 번에 받는다.
+        Rate Limit 그룹 ``ticker`` 초당 10회(IP)."""
+        quotes = [quote_currencies] if isinstance(quote_currencies, str) else list(quote_currencies)
+        data = await self._request("GET", "/v1/ticker/all", params={"quote_currencies": ",".join(quotes)})
+        return self._parse_list(Ticker, data)
+
     async def get_ticker(self, market: str) -> Ticker:
         tickers = await self.get_tickers([market])
         if not tickers:

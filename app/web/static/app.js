@@ -44,6 +44,10 @@
         settingsVersion: 0, settingsHistory: [], form: null, saving: false, saveResult: null, formErrors: [],
         pockets: {}, transfer: { direction: "to_main", amount: 0, bot_pocket_uuid: null }, transferResult: null,
         showDust: false,
+        // 코인 선택 팝업 (설정 탭)
+        picker: { open: false, loading: false, error: null, data: null, query: "", onlySelected: false, selected: new Set(),
+          sort: { key: "acc_trade_price_24h", desc: true } },
+        marketCatalog: {},  // 코드 → 한글 이름
         confirmLive: "", wsConnected: false, ws: null, toast: null, timers: [],
       };
     },
@@ -56,6 +60,21 @@
         return { RUNNING: "실행 중", PAUSED: "일시정지", STOPPED: "정지됨", STARTING: "시작 중", STALE: "응답 없음", NONE: "미실행" }[s] || s;
       },
       modeLabel() { return this.mode === "live" ? "실거래" : "모의매매"; },
+      selectedMarkets() { return this.form ? this.form.marketsText.split(",").map((m) => m.trim().toUpperCase()).filter(Boolean) : []; },
+      pickerRows() {
+        const data = this.picker.data;
+        if (!data) return [];
+        const q = this.picker.query.trim().toLowerCase();
+        let rows = data.items.filter((r) => !q || r.korean_name.toLowerCase().includes(q) || r.english_name.toLowerCase().includes(q) || r.market.toLowerCase().includes(q) || r.base.toLowerCase().includes(q));
+        if (this.picker.onlySelected) rows = rows.filter((r) => this.picker.selected.has(r.market));
+        const { key, desc } = this.picker.sort;
+        const dir = desc ? -1 : 1;
+        return rows.slice().sort((a, b) => {
+          const va = a[key], vb = b[key];
+          if (typeof va === "string" || typeof vb === "string") return String(va || "").localeCompare(String(vb || ""), "ko") * dir;
+          return ((va ?? -Infinity) - (vb ?? -Infinity)) * dir;
+        });
+      },
       paramFields() { return this.form ? schemaFields(this.meta.schemas[this.form.strategy_name]) : []; },
       riskFields() { return schemaFields(this.meta.risk_schema); },
     },
@@ -132,6 +151,7 @@
           // 파라미터 기본값 채우기
           for (const f of schemaFields(this.meta.schemas[d.strategy_name])) if (this.form.strategy_params[f.name] == null) this.form.strategy_params[f.name] = f.default;
           this.saveResult = null; this.formErrors = [];
+          if (!this.picker.data && !this.picker.loading) this.loadMarketCatalog();  // 선택된 마켓의 한글 이름 표시용
         } catch (e) { this.notify("설정 조회 실패: " + e.message, "bad"); }
       },
       resetParams() {
@@ -183,6 +203,38 @@
         const rows = list || [];
         return this.showDust ? rows : rows.filter((b) => b.currency === "KRW" || (Number(b.balance) + Number(b.locked)) >= 1e-6);
       },
+      // ---------- 코인 선택 팝업
+      marketName(code) { return this.marketCatalog[code] || ""; },
+      tradeAmount(v) {
+        if (v == null) return "-";
+        if (v >= 1e12) return (v / 1e12).toFixed(2) + "조 원";
+        if (v >= 1e8) return (v / 1e8).toFixed(1) + "억 원";
+        return this.krw(v);
+      },
+      cautionLabel(c) { return { PRICE_FLUCTUATIONS: "가격 급등락", TRADING_VOLUME_SOARING: "거래량 급증", DEPOSIT_AMOUNT_SOARING: "입금 급증", GLOBAL_PRICE_DIFFERENCES: "해외가 차이", CONCENTRATION_OF_SMALL_ACCOUNTS: "소수계정 집중" }[c] || c; },
+      async loadMarketCatalog(force) {
+        this.picker.loading = true; this.picker.error = null;
+        try {
+          const data = await this.api("/api/markets?quote=KRW" + (force ? "&refresh=true" : ""));
+          this.picker.data = data;
+          const names = {};
+          for (const r of data.items) names[r.market] = r.korean_name;
+          this.marketCatalog = names;
+        } catch (e) { this.picker.error = "코인 목록 조회 실패: " + e.message; }
+        this.picker.loading = false;
+      },
+      openMarketPicker() {
+        this.picker.selected = new Set(this.selectedMarkets);
+        this.picker.query = ""; this.picker.onlySelected = false; this.picker.open = true;
+        if (!this.picker.data && !this.picker.loading) this.loadMarketCatalog();
+      },
+      togglePick(code) { if (this.picker.selected.has(code)) this.picker.selected.delete(code); else this.picker.selected.add(code); },
+      sortBy(key) {
+        if (this.picker.sort.key === key) this.picker.sort.desc = !this.picker.sort.desc;
+        else this.picker.sort = { key, desc: key !== "korean_name" };
+      },
+      applyPicker() { this.form.marketsText = Array.from(this.picker.selected).join(","); this.picker.open = false; },
+      removeMarket(code) { this.form.marketsText = this.selectedMarkets.filter((m) => m !== code).join(","); },
       async loadPockets() { try { this.pockets = await this.api("/api/pockets"); } catch (e) { this.pockets = { error: e.message }; } },
       async doTransfer() {
         if (!confirm(`${this.transfer.direction === "to_bot" ? "메인 → 봇 포켓" : "봇 포켓 → 메인"} 으로 ${this.krw(this.transfer.amount)} 을 이전합니다. 계속할까요?`)) return;

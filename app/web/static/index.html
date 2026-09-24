@@ -38,6 +38,52 @@
 
   <div v-if="toast" class="toast" :class="toast.kind" @click="toast = null">{{ toast.text }}</div>
 
+  <!-- ===================== 코인 선택 팝업 ===================== -->
+  <div v-if="picker.open" class="modal-backdrop" @click.self="picker.open = false">
+    <div class="modal">
+      <div class="modal-head">
+        <h3>거래 가능한 코인 <span class="muted small" v-if="picker.data">원화 마켓 {{ picker.data.count }}개 · {{ fmtTime(picker.data.fetched_at) }} 기준</span></h3>
+        <div class="row wrap">
+          <input v-model="picker.query" placeholder="이름·코드 검색 (예: 비트, BTC)" style="flex:1; min-width: 160px">
+          <label class="inline small muted"><input type="checkbox" v-model="picker.onlySelected"> 선택한 것만</label>
+          <button class="small" @click="loadMarketCatalog(true)" :disabled="picker.loading">새로고침</button>
+        </div>
+        <div class="muted small">시가총액은 업비트 API 가 제공하지 않아 24시간 거래대금(유동성)으로 대신 표시합니다. 제목을 누르면 정렬됩니다.</div>
+      </div>
+      <div class="modal-body">
+        <div v-if="picker.loading" class="muted">업비트에서 코인 목록을 불러오는 중…</div>
+        <div v-else-if="picker.error" class="errors">{{ picker.error }}</div>
+        <table v-else class="markets">
+          <thead><tr>
+            <th></th><th @click="sortBy('korean_name')">코인</th><th @click="sortBy('trade_price')">현재가</th>
+            <th @click="sortBy('change_rate')">24시간 등락</th><th @click="sortBy('acc_trade_price_24h')">24시간 거래대금</th><th>상태</th>
+          </tr></thead>
+          <tbody>
+            <tr v-if="!pickerRows.length"><td colspan="6" class="muted">검색 결과가 없습니다</td></tr>
+            <tr v-for="r in pickerRows" :key="r.market" :class="{ sel: picker.selected.has(r.market) }" @click="togglePick(r.market)">
+              <td><input type="checkbox" :checked="picker.selected.has(r.market)" @click.stop="togglePick(r.market)"></td>
+              <td><b>{{ r.korean_name }}</b> <span class="muted small">{{ r.market }}</span></td>
+              <td>{{ krw(r.trade_price) }}</td>
+              <td :class="sign(r.change_rate)">{{ pct(r.change_rate) }}</td>
+              <td>{{ tradeAmount(r.acc_trade_price_24h) }}</td>
+              <td><span v-if="r.warning" class="pill warnpill">유의</span> <span v-for="c in r.caution" :key="c" class="pill warnpill">{{ cautionLabel(c) }}</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="modal-foot">
+        <div class="chips">
+          <span v-for="m in Array.from(picker.selected)" :key="m" class="chip">{{ marketName(m) }} <b>{{ m }}</b><a @click.prevent="togglePick(m)" title="선택 해제">×</a></span>
+          <span v-if="!picker.selected.size" class="muted small">선택된 코인이 없습니다</span>
+        </div>
+        <div class="actions">
+          <button class="primary" @click="applyPicker">확인 ({{ picker.selected.size }}개)</button>
+          <button @click="picker.open = false">취소</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <!-- ===================== 대시보드 ===================== -->
   <main v-show="tab === 'dashboard'" class="page">
     <section class="kpis">
@@ -148,7 +194,16 @@
       <div class="card">
         <h3>실행 설정 <span class="muted small">DB v{{ settingsVersion }} · 저장하면 새 버전이 되고 엔진이 다음 캔들 경계에 반영합니다</span></h3>
         <div class="form" v-if="form">
-          <label class="field"><span>거래 대상 마켓 <em>재시작 필요</em></span><input v-model="form.marketsText" placeholder="KRW-BTC,KRW-ETH"></label>
+          <div class="field"><span>거래 대상 마켓 <em>재시작 필요</em></span>
+            <div class="row">
+              <input :value="form.marketsText" readonly placeholder="코인 검색 버튼으로 선택하세요" title="직접 입력할 수 없습니다. 코인 검색 버튼으로 고르고 칩의 × 로 뺍니다" style="flex:1" @click="openMarketPicker">
+              <button type="button" class="small" @click="openMarketPicker" title="거래 가능한 코인을 불러와 선택합니다">🔍 코인 검색</button>
+            </div>
+            <div class="chips">
+              <span v-for="m in selectedMarkets" :key="m" class="chip">{{ marketName(m) }} <b>{{ m }}</b><a @click.prevent="removeMarket(m)" title="목록에서 제거">×</a></span>
+              <span v-if="!selectedMarkets.length" class="muted small">선택된 마켓이 없습니다</span>
+            </div>
+          </div>
           <label class="field"><span>캔들 단위 <em>재시작 필요</em></span>
             <select v-model="form.candle_interval"><option v-for="i in meta.intervals" :key="i" :value="i">{{ i }}</option></select>
           </label>

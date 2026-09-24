@@ -11,7 +11,7 @@ from app.api import server as server_module
 from app.api.server import create_app
 from app.api.services import DashboardService
 from app.database import Database, Repository
-from app.exchange.models import Ticker
+from app.exchange.models import Market, Ticker
 from app.strategy.base import Action, Signal
 from app.trading.portfolio import Portfolio
 from tests.test_models import TICKER_JSON
@@ -19,10 +19,33 @@ from tests.test_models import TICKER_JSON
 NOW = datetime.now(UTC)
 
 
+MARKETS_JSON = [
+    {"market": "KRW-BTC", "korean_name": "비트코인", "english_name": "Bitcoin",
+     "market_event": {"warning": False, "caution": {"PRICE_FLUCTUATIONS": False}}},
+    {"market": "KRW-DOGE", "korean_name": "도지코인", "english_name": "Dogecoin",
+     "market_event": {"warning": True, "caution": {"PRICE_FLUCTUATIONS": True, "TRADING_VOLUME_SOARING": False}}},
+    {"market": "KRW-ETH", "korean_name": "이더리움", "english_name": "Ethereum", "market_event": None},
+    {"market": "BTC-ETH", "korean_name": "이더리움", "english_name": "Ethereum", "market_event": None},
+]
+
+
 class FakePublicClient:
     def __init__(self, prices: dict[str, float]) -> None:
         self.prices = prices
         self.calls = 0
+        self.market_calls = 0
+
+    async def get_markets(self, *, is_details: bool = False):
+        self.market_calls += 1
+        return [Market.model_validate(m) for m in MARKETS_JSON]
+
+    async def get_quote_tickers(self, quote_currencies="KRW"):
+        volume = {"KRW-BTC": 3.5e12, "KRW-ETH": 8.2e11, "KRW-DOGE": 1.5e10}
+        return [
+            Ticker.model_validate({**TICKER_JSON, "market": m, "trade_price": self.prices.get(m, 100.0),
+                                   "acc_trade_price_24h": volume[m], "signed_change_rate": 0.01 * i})
+            for i, m in enumerate(["KRW-DOGE", "KRW-ETH", "KRW-BTC"])
+        ]
 
     async def get_tickers(self, markets):
         self.calls += 1
@@ -186,6 +209,25 @@ def test_pockets_endpoints(api, monkeypatch) -> None:
     assert r.status_code == 200 and r.json()["state"] == "done"
     assert client.post("/api/pockets/transfer", json={"direction": "sideways", "amount": 1}).status_code == 400
     assert any(e.event == "pocket_transfer" for e in repo.recent_logs(5))
+
+
+def test_markets_catalog(api) -> None:
+    client, _, _, _ = api
+    body = client.get("/api/markets").json()
+    assert body["quote"] == "KRW" and body["count"] == 3  # BTC-ETH 는 제외
+    assert [r["market"] for r in body["items"]] == ["KRW-BTC", "KRW-ETH", "KRW-DOGE"]  # 거래대금 순
+    btc = body["items"][0]
+    assert btc["korean_name"] == "비트코인" and btc["trade_price"] == 110.0 and btc["base"] == "BTC"
+    assert btc["acc_trade_price_24h"] == 3.5e12 and btc["warning"] is False and btc["caution"] == []
+    doge = body["items"][2]
+    assert doge["warning"] is True and doge["caution"] == ["PRICE_FLUCTUATIONS"]
+    # 60초 캐시: 두 번째 호출은 업비트에 다시 묻지 않고, refresh 면 다시 묻는다
+    public = client.app.state.service.public_client
+    client.get("/api/markets")
+    assert public.market_calls == 1
+    client.get("/api/markets?refresh=true")
+    assert public.market_calls == 2
+    assert client.get("/api/markets?quote=bad!").status_code == 422
 
 
 def test_index_and_static(api) -> None:

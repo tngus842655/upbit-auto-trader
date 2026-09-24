@@ -143,12 +143,12 @@ copy .env.example .env      # Windows
 
 - 대시보드는 **엔진과 별도 프로세스**다. 매매 판단과 주문은 엔진만 하고, 웹 서버는 DB(`engine_status`·`bot_commands`·`bot_settings`)를 읽고 쓸 뿐이다. 브라우저나 웹 서버를 꺼도 엔진은 계속 돈다.
 - 탭: **대시보드**(총 자산·현금·오늘/누적 수익률·MDD·거래 횟수/승률, 자산 곡선, 봇 상태·리스크 상태, 보유 포지션, 현재 전략 신호, 최근 신호/거래/주문/오류) · **설정** · **제어** · **포켓 · 자산 이전** · **로그**. 실시간 갱신은 WebSocket `/ws`(2초), 끊기면 15초 폴링으로 대체한다. 상단에서 PAPER/LIVE 기록을 골라 본다.
-- **설정 탭**: 마켓·캔들 단위·전략·파라미터·리스크 수치를 폼(전략 스키마에서 자동 생성)으로 저장하면 `bot_settings` 에 **새 버전**이 쌓인다. 엔진은 캔들 경계마다 버전을 확인해 전략·파라미터·리스크는 **다음 캔들부터** 반영하고(즉시 무조건 적용하지 않는다), 마켓·캔들 단위는 "재시작 필요" 로 표시한다. `.env` 의 값은 DB 에 버전이 없을 때의 초기값이며, CLI `run` 의 마켓·전략 인자는 그 실행에서만 DB 값을 덮어쓴다.
+- **설정 탭**: 마켓·캔들 단위·전략·파라미터·리스크 수치를 폼(전략 스키마에서 자동 생성)으로 저장하면 `bot_settings` 에 **새 버전**이 쌓인다. 거래 대상 마켓은 직접 입력하지 않고 "🔍 코인 검색" 팝업에서만 고른다(입력창은 읽기 전용) — 업비트 원화 마켓 전체를 현재가·24시간 등락률·24시간 거래대금·유의/주의 표시와 함께 불러와(공개 API, 60초 캐시) 이름·코드로 검색하고 체크박스로 선택하면 선택한 코인이 칩으로 한눈에 보인다(시가총액은 업비트 API 가 제공하지 않아 거래대금으로 대신한다). 엔진은 캔들 경계마다 버전을 확인해 전략·파라미터·리스크는 **다음 캔들부터** 반영하고(즉시 무조건 적용하지 않는다), 마켓·캔들 단위는 "재시작 필요" 로 표시한다. `.env` 의 값은 DB 에 버전이 없을 때의 초기값이며, CLI `run` 의 마켓·전략 인자는 그 실행에서만 DB 값을 덮어쓴다.
 - **제어 탭**: 시작은 `python -m app.main run` 을 분리된 프로세스로 띄운다(로그 `logs/engine-{mode}.log`). 일시정지(신규 매수만 중단, 청산·손절은 계속)/재개/정지/긴급 정지/긴급 정지 해제/설정 다시 읽기는 `bot_commands` 큐로 전달되고 엔진이 2초 안에 처리한다. 강제 종료는 응답 없는 프로세스를 PID 로 내리는 마지막 수단이다. 엔진이 꺼져 있는 동안 큐에 쌓인 명령은 다음 시작 때 무시된다.
 - **LIVE 시작**: 상단 모드를 LIVE 로 바꾸고, `.env` 이중 플래그 + 확인 문구 `REAL-MONEY` 입력 + 브라우저 확인창까지 통과해야 한다. CLI 와 같은 3중 잠금이 그대로 적용되며 웹에서 우회할 수 없다.
 - **포켓 탭**: 봇 API Key 포켓의 잔고 조회, 봇 포켓 → 메인포켓 KRW 이전(봇 키에 "자산이전" 권한). 메인 → 봇 포켓 이전과 포켓 목록은 **메인포켓에서 발급한 "포켓관리" 권한 키**(`UPBIT_POCKET_ACCESS_KEY` / `UPBIT_POCKET_SECRET_KEY`)가 있을 때만 된다. 같은 계정 안의 이동일 뿐이며 외부 출금 API 는 없다.
 - **보안**: 기본 `127.0.0.1` 바인드. `DASHBOARD_TOKEN` 을 설정하면 변경·제어 API 에 `X-Auth-Token`(화면 상단 토큰 칸)이 필요하고, 설정하지 않으면 로컬 호스트에서만 변경을 허용한다. 외부 바인드는 토큰 없이는 거부된다. API Key 값은 화면·API 어디에도 나오지 않는다(설정 여부만 표시).
-- API: `GET /api/status|balance|positions|performance|recent|orders|trades|signals|logs|strategy|settings|pockets`, `PUT /api/settings`, `POST /api/bot/start|pause|resume|stop|halt|resume-risk|reload|kill`, `POST /api/pockets/transfer`, `WS /ws` — 모두 `?mode=paper|live` 로 기록을 고른다.
+- API: `GET /api/status|balance|positions|performance|recent|orders|trades|signals|logs|strategy|settings|pockets|markets`, `PUT /api/settings`, `POST /api/bot/start|pause|resume|stop|halt|resume-risk|reload|kill`, `POST /api/pockets/transfer`, `WS /ws` — 모두 `?mode=paper|live` 로 기록을 고른다.
 
 ### 알림 (Phase 9)
 

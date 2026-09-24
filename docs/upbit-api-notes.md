@@ -67,6 +67,7 @@
 | 일봉 | `GET /v1/candles/days` | `market`, `to`, `count`, `converting_price_unit` | candle | 없음 |
 | 주/월/연봉 | `GET /v1/candles/{weeks,months,years}` | `market`, `to`, `count` | candle | 없음 |
 | 포켓 잔고 | `GET /v1/accounts` | — | default | [자산조회] |
+| 마켓 단위 현재가 | `GET /v1/ticker/all?quote_currencies=KRW` | `quote_currencies` 쉼표 구분 (KRW,BTC,USDT) | ticker (10회/초, IP) | 불필요 — 대시보드 코인 선택 팝업이 원화 마켓 전체 현재가를 한 번에 받는 데 사용 (`reference/list-quote-tickers`, 2024-09-04 신규) |
 
 - `to`: ISO 8601 (`2025-06-24T04:56:53Z`, `2025-06-24 04:56:53`, `2025-06-24T13:56:53+09:00`).
   지정 시각 **이전** 캔들부터 조회, 미지정 시 요청 시각 기준 최신. `count` 기본 1, 최대 200.
