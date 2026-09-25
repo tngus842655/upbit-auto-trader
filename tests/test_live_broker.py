@@ -19,7 +19,7 @@ NOW = datetime(2026, 5, 1, 3, 0, tzinfo=UTC)
 M = "KRW-BTC"
 
 
-def chance(krw: str = "1000000", btc: str = "0", state: str = "active") -> OrderChance:
+def chance(krw: str = "1000000", btc: str = "0", state: str = "active", max_total: str = "1000000000") -> OrderChance:
     return OrderChance.model_validate(
         {
             "bid_fee": "0.0005", "ask_fee": "0.0005", "maker_bid_fee": "0.0005", "maker_ask_fee": "0.0005",
@@ -28,7 +28,7 @@ def chance(krw: str = "1000000", btc: str = "0", state: str = "active") -> Order
                 "bid_types": ["limit", "price"], "ask_types": ["limit", "market"],
                 "bid": {"currency": "KRW", "price_unit": None, "min_total": "5000"},
                 "ask": {"currency": "BTC", "price_unit": None, "min_total": "5000"},
-                "max_total": "1000000000", "state": state,
+                "max_total": max_total, "state": state,
             },
             "bid_account": {"currency": "KRW", "balance": krw, "locked": "0", "avg_buy_price": "0",
                             "avg_buy_price_modified": False, "unit_currency": "KRW"},
@@ -648,3 +648,15 @@ def test_merge_saved_positions_restores_entry_details() -> None:
     assert eth.avg_price == 4_800_000 and eth.cost_known is False and eth.entry_amount == pytest.approx(2_400_000)
     xrp = p.position("KRW-XRP")
     assert xrp.entry_fee == 0.0 and xrp.opened_at != opened
+
+
+async def test_buy_amount_is_capped_by_exchange_max_total(make_settings) -> None:
+    """감사 LOW-12 — 주문 가능 정보의 max_total 보다 큰 매수는 그 금액으로 잘라서 낸다 (거래소 거부 방지)."""
+    done = order_info("u1", side="bid", state="done", executed="0.0005", fee="25",
+                      trades=[trade("100000000", "0.0005")])
+    client = FakeClient(chance_obj=chance(krw="10000000", max_total="50000"), create_results=[done],
+                        order_states=[done])
+    broker = LiveBroker(client, Portfolio(10_000_000), armed_settings(make_settings), sleep=no_sleep)
+    order = await broker.execute(OrderRequest(M, Side.BUY, amount=100_000, client_id="cap"), None, NOW)
+    assert order.status is OrderStatus.FILLED and order.amount == 50_000
+    assert client.created[0]["price"] == "50000"  # 조치 전: "100000"

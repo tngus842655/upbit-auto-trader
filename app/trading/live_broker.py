@@ -280,6 +280,10 @@ class LiveBroker:
                 raise ValueError("매수 금액이 없습니다")
             available = float(chance.bid_account.balance)
             amount = min(request.amount, available)
+            max_total = float(chance.max_total) if chance.max_total is not None else 0.0
+            if max_total > 0 and amount > max_total:  # 거래소 최대 주문 금액 (감사 LOW-12) — 거부되지 않게 미리 자름
+                log.info("%s 매수 금액 %.0f → 거래소 최대 주문 금액 %.0f 으로 제한", request.market, amount, max_total)
+                amount = max_total
             min_total = float(chance.min_total_bid or 0)
             if amount < min_total:
                 raise ValueError(
