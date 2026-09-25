@@ -385,3 +385,34 @@ def test_live_balance_reads_exchange_before_first_engine_run(api, monkeypatch) -
     assert client.get("/api/balance?mode=paper").json()["source"] == "db"  # 모의매매는 DB 그대로
     perf = client.get("/api/performance?mode=live").json()
     assert perf["equity"] == pytest.approx(35_000.11) and perf["cumulative_return"] is None
+
+
+def test_today_return_ignores_deposit_already_in_base(api, monkeypatch) -> None:
+    """오늘 첫 기록이 입금 뒤의 잔고면 오늘 수익률은 0% (조치 전: 입금액을 통째로 빼서 -100%)."""
+    client, repo, _, db = api
+
+    class FakeBot:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def get_accounts(self):
+            return [Account.model_validate({"currency": "KRW", "balance": "35000", "locked": "0", "avg_buy_price": "0",
+                                            "avg_buy_price_modified": False, "unit_currency": "KRW"})]
+
+    monkeypatch.setattr(DashboardService, "bot_client", lambda self: FakeBot())
+    Repository(db, "live").save_cash_flow(35_000, "메인→봇")  # 오늘 입금, 아직 스냅샷 없음
+    perf = client.get("/api/performance?mode=live").json()
+    assert perf["equity"] == 35_000 and perf["today_return"] == pytest.approx(0.0)
+    # 어제 스냅샷이 있고 오늘 입금이 있으면: (지금 자산 - 오늘 입금) / 어제 마지막 자산 - 1
+    seed(repo)
+    repo.save_cash_flow(100_000, "입금")
+    before = client.get("/api/balance?mode=paper").json()["equity"]
+    perf = client.get("/api/performance?mode=paper").json()
+    from app.database.models import from_db_time
+
+    day_start = datetime.now(UTC).astimezone(KST).replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_last = [s.equity for s in repo.balance_series() if from_db_time(s.time) < day_start][-1]
+    assert perf["today_return"] == pytest.approx((before - 100_000) / yesterday_last - 1)

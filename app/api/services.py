@@ -221,10 +221,13 @@ class DashboardService:
         cumulative = (equity_now / adjusted_initial - 1) if equity_now is not None and adjusted_initial else None
 
         day_start_kst = now.astimezone(KST).replace(hour=0, minute=0, second=0, microsecond=0)
-        before_today = [e for t, e in points if t < day_start_kst]
-        today_points = [e for t, e in points if t >= day_start_kst]
-        day_base = before_today[-1] if before_today else (today_points[0] if today_points else None)
-        today_flow = repo.net_cash_flow(since=day_start_kst)
+        before_today = [(t, e) for t, e in points if t < day_start_kst]
+        today_points = [(t, e) for t, e in points if t >= day_start_kst]
+        base_point = before_today[-1] if before_today else (today_points[0] if today_points else None)
+        day_base = base_point[1] if base_point else None
+        # 기준점 이후의 입출금만 뺀다. 기준점이 오늘 첫 기록(예: 방금 읽은 거래소 잔고)이면 그 안에 이미 입금이
+        # 들어 있으므로 하루 전체 입출금을 빼면 -100% 처럼 나온다.
+        today_flow = repo.net_cash_flow(since=base_point[0]) if base_point else 0.0
         today_return = ((equity_now - today_flow) / day_base - 1) if equity_now is not None and day_base else None
 
         mdd = 0.0
