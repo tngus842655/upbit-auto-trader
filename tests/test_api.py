@@ -344,3 +344,14 @@ def test_index_and_static(api) -> None:
     r = client.get("/")
     assert r.status_code == 200 and "업비트 자동매매" in r.text
     assert client.get("/static/app.js").status_code == 200
+
+
+def test_dashboard_bot_client_cannot_place_orders(make_settings) -> None:
+    """감사 LOW-13 — 대시보드의 봇 클라이언트는 LIVE 이중 플래그가 켜져 있어도 주문 권한이 없다."""
+    settings = make_settings(trading_mode="LIVE", live_trading_enabled=True, upbit_access_key="a" * 20,
+                             upbit_secret_key="b" * 40)
+    assert settings.is_live_trading_allowed is True
+    service = DashboardService(settings, Database("sqlite://"), FakePublicClient({}))
+    client = service.bot_client()
+    assert client is not None and client.orders_allowed is False  # 조치 전: True (from_settings 가 이중 플래그를 상속)
+    assert DashboardService(make_settings(), Database("sqlite://"), FakePublicClient({})).bot_client() is None

@@ -257,7 +257,11 @@ class DashboardService:
         )
 
     def bot_client(self) -> UpbitClient | None:
-        return UpbitClient.from_settings(self.settings) if self.settings.has_api_keys else None
+        """봇 API Key 클라이언트 — 조회·포켓 이전 전용. .env 가 LIVE 이중 플래그여도 대시보드 프로세스에는 주문
+        권한을 주지 않는다 (감사 LOW-13): 주문은 엔진 프로세스만 낸다."""
+        if not self.settings.has_api_keys:
+            return None
+        return UpbitClient.from_settings(self.settings, allow_orders=False)
 
     async def pockets(self) -> dict[str, Any]:
         """포켓 목록과 잔고. 메인포켓 키가 없으면 봇 포켓 잔고만 보여준다."""
