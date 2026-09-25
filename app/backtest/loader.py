@@ -16,6 +16,7 @@ import pandas as pd
 from app.config.settings import Settings
 from app.core.exceptions import MarketDataError
 from app.exchange.models import CandleInterval
+from app.exchange.rate_limiter import RateLimiter
 from app.exchange.upbit_client import UpbitClient
 from app.strategy.data import (
     candles_to_dataframe,
@@ -50,7 +51,10 @@ async def load_candles(
     csv: Path | str | None = None,
     cache_dir: Path | str = DEFAULT_CACHE_DIR,
     use_cache: bool = True,
+    rate_limiter: RateLimiter | None = None,
 ) -> pd.DataFrame:
+    """캔들을 CSV → 캐시 → REST 순으로 구한다. ``rate_limiter`` 를 주면 REST 조회가 그 한도를 따른다
+    (대시보드처럼 엔진과 IP 한도를 나눠 써야 하는 호출자용, 감사 MEDIUM-12)."""
     interval = CandleInterval.parse(interval)
     if start.tzinfo is None or (end is not None and end.tzinfo is None):
         raise ValueError("start/end 는 시간대가 있는 datetime 이어야 합니다")
@@ -71,7 +75,8 @@ async def load_candles(
             df = load_candles_csv(path, market=market, interval=interval.value)
             source = f"cache:{path}"
         else:
-            async with UpbitClient.from_settings(settings) as client:
+            overrides = {"rate_limiter": rate_limiter} if rate_limiter is not None else {}
+            async with UpbitClient.from_settings(settings, **overrides) as client:
                 candles = await client.get_candles_range(market, interval, start=start, end=end)
             df = candles_to_dataframe(candles, interval=interval)
             df = drop_unclosed(df, interval, now)

@@ -172,3 +172,61 @@ def test_backtest_api_flow(make_settings, tmp_path) -> None:
         assert client.delete(f"/api/backtest/jobs/{job_id}").json()["deleted"] is True
         assert client.get(f"/api/backtest/jobs/{job_id}").status_code == 404
         assert client.delete("/api/backtest/jobs/nope").status_code == 404
+
+
+async def test_dashboard_jobs_run_one_at_a_time(make_settings, tmp_path) -> None:
+    """감사 MEDIUM-12 — 작업을 여러 개 제출해도 한 번에 하나만 돌고(나머지는 queued), 로더 호출이 겹치지 않는다."""
+    import asyncio
+
+    active = {"now": 0, "max": 0}
+    release = asyncio.Event()
+
+    async def slow_loader(settings, market, interval, start, end=None, **kwargs):
+        active["now"] += 1
+        active["max"] = max(active["max"], active["now"])
+        await release.wait()
+        active["now"] -= 1
+        return await fake_loader(settings, market, interval, start, end)
+
+    runner = BacktestRunner(make_settings(), loader=slow_loader, save_dir=tmp_path / "bt")
+    req = BacktestRequest(strategy_name="ma_cross", strategy_params={}, markets=["KRW-BTC"], candle_interval="60m",
+                          periods=[Period(label="p", start=datetime(2026, 1, 1, tzinfo=KST),
+                                          end=datetime(2026, 1, 20, tzinfo=KST))], save=False)
+    first, second = runner.submit(req), runner.submit(req)
+    await asyncio.sleep(0.05)
+    assert first.status == "running" and second.status == "queued" and active["max"] == 1
+    release.set()
+    await asyncio.gather(first.task, second.task)
+    assert first.status == "done" and second.status == "done" and active["max"] == 1
+
+
+async def test_dashboard_loader_uses_slow_shared_rate_limiter(make_settings, monkeypatch) -> None:
+    """감사 MEDIUM-12 — 대시보드 로더는 REST 조회에 초당 3회 공용 리미터를 넘기고, CLI 로더는 기본 리미터를 쓴다."""
+    from app.api import backtests as bt
+    from app.backtest import loader as loader_module
+    from app.exchange.upbit_client import UpbitClient
+
+    seen: list[dict] = []
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            seen.append(kwargs)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def get_candles_range(self, market, interval, *, start, end):
+            raise MarketDataError("stop here")
+
+    monkeypatch.setattr(UpbitClient, "from_settings", classmethod(lambda cls, settings, **ov: FakeClient(**ov)))
+    start, end = datetime(2026, 1, 1, tzinfo=UTC), datetime(2026, 1, 2, tzinfo=UTC)
+    with pytest.raises(MarketDataError):
+        await bt.dashboard_load_candles(make_settings(), "KRW-BTC", "60m", start, end, use_cache=False)
+    with pytest.raises(MarketDataError):
+        await loader_module.load_candles(make_settings(), "KRW-BTC", "60m", start, end, use_cache=False)
+    assert seen[0]["rate_limiter"] is bt.DASHBOARD_RATE_LIMITER and "rate_limiter" not in seen[1]
+    assert bt.DASHBOARD_RATE_LIMITER.limiter("candle").limit == 3  # 초당 3회, 안전 여유 없이 정확히
+    assert BacktestRunner(make_settings()).loader is bt.dashboard_load_candles

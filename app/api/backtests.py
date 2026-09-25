@@ -29,6 +29,7 @@ from app.config.settings import PROJECT_ROOT, Settings
 from app.core.exceptions import TraderError
 from app.database.models import from_db_time
 from app.exchange.models import KST, CandleInterval
+from app.exchange.rate_limiter import RATE_LIMIT_RULES, RateLimiter, RateLimitRule
 from app.risk.config import RiskConfig
 from app.strategy import STRATEGIES, create_strategy
 
@@ -38,11 +39,24 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 MAX_JOBS = 20
+# 대시보드 백테스트의 캔들 조회 한도: 엔진(같은 IP, 시세 그룹 초당 10회)과 나눠 쓰므로 초당 3회로 낮춘다
+# (감사 MEDIUM-12).
+# 프로세스에 하나만 두어 동시에 여러 작업이 있어도 합산 속도가 이 한도를 넘지 않는다.
+DASHBOARD_CANDLE_RULES = {
+    "candle": RateLimitRule("candle", 3), "market": RateLimitRule("market", 3), "ticker": RateLimitRule("ticker", 3),
+}
+DASHBOARD_RATE_LIMITER = RateLimiter(rules={**RATE_LIMIT_RULES, **DASHBOARD_CANDLE_RULES}, safety_margin=0)
 KEEP_JOBS = 100  # DB 에 남기는 최근 작업 수
 MAX_EQUITY_POINTS = 300
 MAX_TRADES = 60
 
 CandleLoader = Callable[..., Awaitable[pd.DataFrame]]
+
+
+async def dashboard_load_candles(settings: Settings, market: str, interval: CandleInterval | str,
+                                 start: datetime, end: datetime | None = None, **kwargs: Any) -> pd.DataFrame:
+    """대시보드용 캔들 로더 — 캐시는 그대로, REST 조회만 낮은 한도의 공용 리미터를 쓴다."""
+    return await load_candles(settings, market, interval, start, end, rate_limiter=DASHBOARD_RATE_LIMITER, **kwargs)
 
 
 def parse_kst(value: Any) -> datetime:
@@ -255,7 +269,7 @@ class BacktestRunner:
         self,
         settings: Settings,
         *,
-        loader: CandleLoader = load_candles,
+        loader: CandleLoader = dashboard_load_candles,
         save_dir: Path | str | None = None,
         max_jobs: int = MAX_JOBS,
         repo: Repository | None = None,
@@ -268,6 +282,9 @@ class BacktestRunner:
         self.save_dir = Path(save_dir) if save_dir else PROJECT_ROOT / "data" / "backtests"
         self.max_jobs = max_jobs
         self.jobs: dict[str, BacktestJob] = {}
+        # 작업은 한 번에 하나만 돈다 (제출은 여러 개 가능, 나머지는 queued 로 대기) — 캔들 조회·CPU 를 몰아 쓰지 않게
+        # (감사 MEDIUM-12)
+        self._gate = asyncio.Semaphore(1)
 
     # ------------------------------------------------------------------
     def defaults(self) -> dict[str, Any]:
@@ -368,6 +385,10 @@ class BacktestRunner:
             self.jobs.pop(oldest.id, None)
 
     async def _run(self, job: BacktestJob) -> None:
+        async with self._gate:
+            await self._run_locked(job)
+
+    async def _run_locked(self, job: BacktestJob) -> None:
         job.status = "running"
         self._persist(job)
         req = job.request
