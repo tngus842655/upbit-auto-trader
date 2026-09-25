@@ -215,8 +215,9 @@ class DashboardService:
         if equity_now is not None:
             points.append((now, equity_now))
         initial = bal["initial_cash"]
-        # 포켓 이전(입출금)은 손익이 아니다: 기준 자산에 순입출금을 더해 비교한다 (감사 MEDIUM-4)
-        net_flow = repo.net_cash_flow()
+        # 포켓 이전(입출금)은 손익이 아니다: 기준 자산에 순입출금을 더해 비교한다 (감사 MEDIUM-4).
+        # 단 계좌를 만들 때 initial_cash 에 이미 들어간 입출금은 빼고 더한다 — 첫 실행 전 입금을 두 번 세면 -50% 가 된다
+        net_flow = repo.net_cash_flow(after_id=repo.cash_flow_base_id())
         adjusted_initial = (initial + net_flow) if initial is not None else None
         cumulative = (equity_now / adjusted_initial - 1) if equity_now is not None and adjusted_initial else None
 

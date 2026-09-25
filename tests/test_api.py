@@ -12,6 +12,7 @@ from app.api import server as server_module
 from app.api.server import create_app
 from app.api.services import DashboardService
 from app.database import Database, Repository
+from app.database.models import AccountRecord
 from app.exchange.models import KST, Account, Market, Ticker
 from app.strategy.base import Action, Signal
 from app.trading.portfolio import Portfolio
@@ -334,6 +335,38 @@ def test_performance_excludes_cash_flows(api) -> None:
     assert perf["net_cash_flow"] == 100_000 and perf["equity"] == before["equity"]
     assert perf["cumulative_return"] == pytest.approx(perf["equity"] / (perf["initial_cash"] + 100_000) - 1)
     assert perf["cumulative_return"] < before["cumulative_return"]
+
+
+def test_cumulative_return_ignores_deposit_before_first_start(api) -> None:
+    """실거래 첫 실행 전 입금은 initial_cash(거래소 잔고)에 이미 들어 있다 — 또 더하면 35,000/70,000 = -50%."""
+    client, _, _, db = api
+    live = Repository(db, "live")
+    live.save_cash_flow(35_000, "메인→봇")  # 엔진 시작 전 포켓 이전
+    portfolio = Portfolio(35_000)  # 첫 실행: 거래소 잔고로 계좌를 만든다
+    live.sync_portfolio(portfolio)
+    live.snapshot_balance(portfolio, {}, NOW)
+    perf = client.get("/api/performance?mode=live").json()
+    assert perf["initial_cash"] == 35_000 and perf["net_cash_flow"] == 0
+    assert perf["cumulative_return"] == pytest.approx(0.0)
+    live.save_cash_flow(10_000, "추가 입금")  # 시작 뒤 입금은 기준 자산에 더한다
+    portfolio.cash += 10_000
+    live.sync_portfolio(portfolio)
+    perf = client.get("/api/performance?mode=live").json()
+    assert perf["net_cash_flow"] == 10_000 and perf["cumulative_return"] == pytest.approx(0.0)
+
+
+def test_cumulative_return_base_backfilled_for_old_account(api) -> None:
+    """기준점 컬럼이 없던 때 만든 계좌: 첫 잔고 기록 전 입출금을 initial_cash 에 든 것으로 보고 한 번 채워 저장한다."""
+    client, _, _, db = api
+    live = Repository(db, "live")
+    flow_id = live.save_cash_flow(35_000, "메인→봇", time=NOW - timedelta(hours=1))
+    portfolio = Portfolio(35_000)
+    live.sync_portfolio(portfolio)
+    live.snapshot_balance(portfolio, {}, NOW - timedelta(minutes=30))
+    with db.session() as s:  # 컬럼 추가 전 계좌 흉내
+        s.get(AccountRecord, "live").cash_flow_base_id = None
+    assert client.get("/api/performance?mode=live").json()["cumulative_return"] == pytest.approx(0.0)
+    assert live.load_account().cash_flow_base_id == flow_id  # 저장됨 — 첫 잔고 기록이 보존 기간으로 지워져도 기준 유지
 
 
 def test_markets_catalog(api) -> None:

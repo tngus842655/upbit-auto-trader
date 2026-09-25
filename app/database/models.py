@@ -147,6 +147,9 @@ class AccountRecord(Base):
     cash: Mapped[float] = mapped_column(Float)
     fees_paid: Mapped[float] = mapped_column(Float, default=0.0)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, onupdate=utcnow_naive)
+    # initial_cash 를 잴 때 이미 들어 있던 입출금(cash_flows)의 마지막 id. 누적 수익률은 이 뒤의 입출금만 기준 자산에
+    # 더한다 — 첫 실행 전에 넣은 돈을 두 번 세지 않도록. None 은 이 컬럼 이전에 만든 계좌 (Repository.cash_flow_base_id)
+    cash_flow_base_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
 class BalanceSnapshot(Base):

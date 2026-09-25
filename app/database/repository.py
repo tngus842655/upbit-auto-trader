@@ -90,12 +90,14 @@ class Repository:
         )
 
     def _sync_portfolio_in(self, s: Any, portfolio: Portfolio) -> None:
-        s.merge(
-            AccountRecord(
-                mode=self.mode, initial_cash=portfolio.initial_cash, cash=portfolio.cash,
-                fees_paid=portfolio.fees_paid,
-            )
-        )
+        account = s.get(AccountRecord, self.mode)
+        if account is None:
+            # 새 계좌의 initial_cash 에는 지금까지의 입출금이 이미 들어 있다 → 누적 수익률은 이 id 뒤 입출금만 더한다
+            account = AccountRecord(mode=self.mode, cash_flow_base_id=self._max_cash_flow_id_in(s))
+            s.add(account)
+        account.initial_cash = portfolio.initial_cash
+        account.cash = portfolio.cash
+        account.fees_paid = portfolio.fees_paid
         s.execute(delete(PositionRecord).where(PositionRecord.mode == self.mode))
         for market, pos in portfolio.positions.items():
             s.add(
@@ -382,14 +384,41 @@ class Repository:
                 stmt = stmt.where(CashFlowRecord.time >= to_db_time(since))
             return list(s.execute(stmt.order_by(CashFlowRecord.id)).scalars())
 
-    def net_cash_flow(self, since: datetime | None = None, currency: str = "KRW") -> float:
+    def net_cash_flow(self, since: datetime | None = None, currency: str = "KRW", *, after_id: int = 0) -> float:
         """기간 입출금 합계 (KRW). 누적 수익률의 기준 자산 조정에 쓴다."""
-        return float(sum(f.amount for f in self.load_cash_flows(since=since) if f.currency == currency))
+        flows = self.load_cash_flows(after_id=after_id, since=since)
+        return float(sum(f.amount for f in flows if f.currency == currency))
+
+    def _max_cash_flow_id_in(self, s: Any) -> int:
+        value = s.execute(select(func.max(CashFlowRecord.id)).where(CashFlowRecord.mode == self.mode)).scalar()
+        return int(value or 0)
 
     def max_cash_flow_id(self) -> int:
         with self.db.session() as s:
-            value = s.execute(select(func.max(CashFlowRecord.id)).where(CashFlowRecord.mode == self.mode)).scalar()
-            return int(value or 0)
+            return self._max_cash_flow_id_in(s)
+
+    def cash_flow_base_id(self) -> int:
+        """누적 수익률 기준점 — 계좌 initial_cash 에 이미 들어 있는 마지막 입출금 id (이 뒤 입출금만 기준에 더한다).
+
+        값이 없는 예전 계좌는 첫 잔고 기록(= 엔진 첫 실행) 이전 입출금이 initial_cash 에 들어 있다고 보고 한 번 채워
+        저장한다 — 잔고 기록은 보존 기간(db_retention_days)이 지나면 지워지므로 나중에 다시 계산하면 기준이 달라진다.
+        """
+        with self.db.session() as s:
+            account = s.get(AccountRecord, self.mode)
+            if account is None:
+                return 0
+            if account.cash_flow_base_id is None:
+                first = s.execute(
+                    select(func.min(BalanceSnapshot.time)).where(BalanceSnapshot.mode == self.mode)
+                ).scalar()
+                if first is None:
+                    return 0
+                base = s.execute(
+                    select(func.max(CashFlowRecord.id))
+                    .where(CashFlowRecord.mode == self.mode, CashFlowRecord.time <= first)
+                ).scalar()
+                account.cash_flow_base_id = int(base or 0)
+            return int(account.cash_flow_base_id)
 
     # ------------------------------------------------------------------
     # 실행 설정 (bot_settings)
