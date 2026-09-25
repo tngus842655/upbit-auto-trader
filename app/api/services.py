@@ -11,6 +11,7 @@ import logging
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 from app.backtest.metrics import max_drawdown
@@ -141,10 +142,44 @@ class DashboardService:
             "server_time": datetime.now(KST).isoformat(),
         }
 
+    async def _exchange_snapshot(self) -> tuple[float, list[Any]] | None:
+        """봇 API 키로 자동매매 포켓 잔고를 읽어 (현금 KRW, 포지션 모양 객체 목록)으로 돌려준다. 실패하면 None."""
+        bot = self.bot_client()
+        if bot is None:
+            return None
+        try:
+            async with bot:
+                accounts = await bot.get_accounts()
+        except TraderError as exc:
+            log.warning("봇 포켓 잔고 조회 실패: %s", exc)
+            return None
+        cash = 0.0
+        rows: list[Any] = []
+        for a in accounts:
+            total = float(a.balance) + float(a.locked)
+            if a.currency == "KRW":
+                cash += total
+            elif total > 0:
+                avg = float(a.avg_buy_price)
+                rows.append(SimpleNamespace(market=f"KRW-{a.currency}", quantity=total, avg_price=avg,
+                                            entry_amount=total * avg, entry_fee=0.0, opened_at=None,
+                                            cost_known=avg > 0))
+        return cash, rows
+
     async def balance(self, mode: str) -> dict[str, Any]:
         repo = self.repo(mode)
         account = repo.load_account()
-        positions = repo.load_positions()
+        positions: list[Any] = list(repo.load_positions())
+        source, note, cash_override = "db", None, None
+        if mode == "live" and account is None:
+            # 실거래 엔진이 아직 한 번도 돌지 않았으면 DB 에 계좌가 없다 → 봇 포켓 잔고를 거래소에서 직접 읽어 준다.
+            # 엔진이 시작하면 잔고 동기화로 DB 계좌가 생기고 그때부터는 DB(엔진 기준)를 보여 준다.
+            fetched = await self._exchange_snapshot()
+            if fetched is not None:
+                cash_override, positions, source = fetched[0], fetched[1], "exchange"
+                note = "실거래 엔진 미실행 — 봇 포켓 잔고를 거래소에서 바로 읽음"
+            else:
+                note = "실거래 엔진 미실행 — 봇 포켓 잔고를 읽지 못함 (API 키·네트워크 확인)"
         prices = await self.prices.get([p.market for p in positions])
         rows = []
         positions_value = 0.0
@@ -159,7 +194,7 @@ class DashboardService:
                 "opened_at": _iso(p.opened_at), "cost_known": p.cost_known is not False,
             })
             positions_value += value or 0.0
-        cash = account.cash if account else None
+        cash = cash_override if cash_override is not None else (account.cash if account else None)
         equity = (cash + positions_value) if cash is not None else None
         snap = repo.latest_balance()
         return {
@@ -167,7 +202,7 @@ class DashboardService:
             "positions_value": positions_value, "equity": equity, "positions": rows,
             "fees_paid": account.fees_paid if account else 0.0,
             "snapshot_time": _iso(snap.time) if snap else None,
-            "prices": prices,
+            "prices": prices, "source": source, "note": note,
         }
 
     async def performance(self, mode: str) -> dict[str, Any]:

@@ -88,7 +88,7 @@
   <main v-show="tab === 'dashboard'" class="page">
     <section class="kpis">
       <div class="kpi"><span class="k">총 자산</span><span class="v">{{ krw(balance.equity) }}</span><span class="s">초기 {{ krw(balance.initial_cash) }}</span></div>
-      <div class="kpi"><span class="k">현금 잔고</span><span class="v">{{ krw(balance.cash) }}</span><span class="s">코인 {{ krw(balance.positions_value) }}</span></div>
+      <div class="kpi"><span class="k">현금 잔고</span><span class="v">{{ krw(balance.cash) }}</span><span class="s">코인 {{ krw(balance.positions_value) }}<template v-if="balance.source === 'exchange'"> · 거래소 잔고 (엔진 미실행)</template></span></div>
       <div class="kpi"><span class="k">오늘 수익률</span><span class="v" :class="sign(perf.today_return)">{{ pct(perf.today_return) }}</span><span class="s">오늘 실현 {{ krw(perf.today_realized_pnl) }}</span></div>
       <div class="kpi"><span class="k">누적 수익률</span><span class="v" :class="sign(perf.cumulative_return)">{{ pct(perf.cumulative_return) }}</span><span class="s">실현 {{ krw(perf.realized_pnl) }}</span></div>
       <div class="kpi"><span class="k">최대 낙폭 (MDD)</span><span class="v neg">{{ pct(perf.mdd) }}</span><span class="s">{{ perf.mdd_trough_time ? fmtTime(perf.mdd_trough_time) : '-' }}</span></div>

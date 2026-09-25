@@ -12,7 +12,7 @@ from app.api import server as server_module
 from app.api.server import create_app
 from app.api.services import DashboardService
 from app.database import Database, Repository
-from app.exchange.models import KST, Market, Ticker
+from app.exchange.models import KST, Account, Market, Ticker
 from app.strategy.base import Action, Signal
 from app.trading.portfolio import Portfolio
 from tests.test_models import TICKER_JSON
@@ -355,3 +355,33 @@ def test_dashboard_bot_client_cannot_place_orders(make_settings) -> None:
     client = service.bot_client()
     assert client is not None and client.orders_allowed is False  # 조치 전: True (from_settings 가 이중 플래그를 상속)
     assert DashboardService(make_settings(), Database("sqlite://"), FakePublicClient({})).bot_client() is None
+
+
+def test_live_balance_reads_exchange_before_first_engine_run(api, monkeypatch) -> None:
+    """실거래 엔진이 아직 돌지 않아 DB 에 계좌가 없으면 대시보드가 봇 포켓 잔고를 거래소에서 직접 보여 준다."""
+    client, _, _, _ = api
+
+    class FakeBot:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return None
+
+        async def get_accounts(self):
+            return [
+                Account.model_validate({"currency": "KRW", "balance": "35000", "locked": "0", "avg_buy_price": "0",
+                                        "avg_buy_price_modified": False, "unit_currency": "KRW"}),
+                Account.model_validate({"currency": "BTC", "balance": "0.001", "locked": "0", "avg_buy_price": "100",
+                                        "avg_buy_price_modified": False, "unit_currency": "KRW"}),
+            ]
+
+    monkeypatch.setattr(DashboardService, "bot_client", lambda self: FakeBot())
+    bal = client.get("/api/balance?mode=live").json()
+    assert bal["source"] == "exchange" and bal["cash"] == 35_000 and bal["initial_cash"] is None
+    assert bal["positions"][0]["market"] == "KRW-BTC" and bal["positions"][0]["current_price"] == 110.0
+    assert bal["equity"] == pytest.approx(35_000 + 0.001 * 110.0)
+    assert "미실행" in bal["note"]
+    assert client.get("/api/balance?mode=paper").json()["source"] == "db"  # 모의매매는 DB 그대로
+    perf = client.get("/api/performance?mode=live").json()
+    assert perf["equity"] == pytest.approx(35_000.11) and perf["cumulative_return"] is None

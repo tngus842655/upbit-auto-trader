@@ -824,7 +824,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"설정 오류: {exc}", file=sys.stderr)
         return 2
     log_dir = settings.log_dir if settings.log_dir.is_absolute() else PROJECT_ROOT / settings.log_dir
-    setup_logging(settings.log_level, log_dir)
+    # 프로세스별 파일: 모의매매·실거래 엔진과 대시보드가 같은 회전 로그를 쓰면 Windows 에서 회전이 겹쳐 실패한다
+    if args.command == "run":
+        log_name = f"trader-{settings.trading_mode.value.lower()}.log"
+    elif args.command == "serve":
+        log_name = "trader-dashboard.log"
+    else:
+        log_name = "trader.log"
+    setup_logging(settings.log_level, log_dir, filename=log_name)
     log.info(
         "시작: command=%s mode=%s live_allowed=%s",
         args.command, settings.trading_mode.value, settings.is_live_trading_allowed,
