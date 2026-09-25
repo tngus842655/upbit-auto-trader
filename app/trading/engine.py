@@ -470,9 +470,12 @@ class TradingEngine:
                          f"시장가 매수 {decision.amount or 0:,.0f}원 · 사유: {signal.reason}",
                          {"signal": signal.to_dict(), "amount": decision.amount})
         else:
+            # 전략 매도는 전량(quantity=None) — 알림에는 실제 보유 수량을 보여 준다 (0.00000000개 로 보이던 문제)
+            held = self.portfolio.position(signal.market)
+            qty = decision.quantity if decision.quantity is not None else (held.quantity if held else 0.0)
             self._notify(EventKind.SELL, signal.market,
-                         f"시장가 매도 {decision.quantity or 0:.8f}개 · 사유: {signal.reason}",
-                         {"signal": signal.to_dict(), "quantity": decision.quantity})
+                         f"시장가 매도 전량 {qty:.8f}개 · 사유: {signal.reason}",
+                         {"signal": signal.to_dict(), "quantity": qty})
         order = await self.broker.execute(request, price, now)
         self._record_order(order)
 
@@ -1051,18 +1054,19 @@ class TradingEngine:
         self.write_heartbeat("RUNNING")
         deadline = self.clock() + timedelta(seconds=duration_seconds) if duration_seconds else None
         last_snapshot = self.clock()
+        # 다음 캔들 처리 시각. 반복마다 다시 계산하면 안 된다: 경계를 지난 뒤 깨어난 반복에서 "다음" 경계로 밀려
+        # 유예(candle_grace_seconds)가 명령 폴링 간격보다 길 때 캔들 처리가 영원히 실행되지 않는다.
+        # 처리한 뒤에만 앞으로 옮긴다.
+        target = next_boundary(self.clock(), self.interval.seconds, self.settings.candle_grace_seconds)
         try:
             while not self._stop.is_set():
                 now = self.clock()
                 if deadline and now >= deadline:
                     break
-                target = next_boundary(now, self.interval.seconds, self.settings.candle_grace_seconds)
                 snapshot_at = last_snapshot + timedelta(seconds=self.settings.snapshot_interval_seconds)
                 poll_at = now + timedelta(seconds=self.command_poll_interval)
                 wake = min(target, snapshot_at, poll_at, deadline) if deadline else min(target, snapshot_at, poll_at)
-                wait = max((wake - now).total_seconds(), 0.0)
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self._stop.wait(), timeout=wait) if wait > 0 else None
+                await self._wait_for_stop(max((wake - now).total_seconds(), 0.0))
                 if self._stop.is_set():
                     break
                 now = self.clock()
@@ -1086,6 +1090,7 @@ class TradingEngine:
                     await self._guarded("청산 감시", lambda now=now: self.check_exits(now, force=True))
                     await self._guarded("설정 반영", self.maybe_reload_settings)
                     await self._guarded("캔들 처리", lambda now=now: self.process_closed_candles(now))
+                    target = next_boundary(self.clock(), self.interval.seconds, self.settings.candle_grace_seconds)
                 if now >= snapshot_at - timedelta(milliseconds=1):
                     await self._guarded("시세 보정", lambda now=now: self.ensure_prices(now))
                     if isinstance(self.broker, LiveBroker):
@@ -1130,6 +1135,13 @@ class TradingEngine:
 
     def stop(self) -> None:
         self._stop.set()
+
+    async def _wait_for_stop(self, seconds: float) -> None:
+        """다음 깨어날 시각까지 기다린다 (정지 요청이 오면 바로 깬다). 테스트는 가짜 시계 진행 함수로 바꿔 끼운다."""
+        if seconds <= 0:
+            return
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(self._stop.wait(), timeout=seconds)
 
     def stats_dict(self) -> dict[str, Any]:
         s = self.stats
