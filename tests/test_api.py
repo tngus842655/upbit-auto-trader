@@ -110,6 +110,22 @@ def test_balance_performance_recent(api) -> None:
     assert client.get("/api/signals").json()[0]["market"] == "KRW-BTC"
 
 
+def test_recent_signal_limit(api) -> None:
+    """'최근 신호' 표만 signal_limit 개(대시보드 100)를 받고 주문·오류 표는 limit 을 따른다."""
+    client, repo, _, _ = api
+    for i in range(30):
+        t = NOW - timedelta(minutes=15 * i)
+        repo.save_signal(Signal(Action.HOLD, "KRW-BTC", t, 100.0, "ma_cross"), "15m")
+        repo.log("ERROR", "api_error", f"오류 {i}")
+    repo.save_signal(Signal(Action.BUY, "KRW-BTC", NOW, 101.0, "ma_cross", "골든크로스"), "1m")
+    recent = client.get("/api/recent?limit=5&signal_limit=25").json()
+    assert len(recent["signals"]) == 25 and len(recent["errors"]) == 5
+    same_time = [s for s in recent["signals"] if s["time"] == recent["signals"][0]["time"]]
+    assert len(same_time) == 2 and same_time[0]["id"] != same_time[1]["id"]  # 1m·15m 같은 시각도 행 구분
+    assert len(client.get("/api/recent?limit=5").json()["signals"]) == 5  # 안 주면 limit 과 같다
+    assert client.get("/api/recent?signal_limit=201").status_code == 422
+
+
 def test_logs_paging_and_filters(api) -> None:
     client, repo, _, _ = api
     for i in range(250):

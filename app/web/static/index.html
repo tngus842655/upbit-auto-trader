@@ -141,13 +141,15 @@
           </div>
         </div>
         <div v-else class="muted">아직 신호가 없습니다.</div>
-        <h3 class="mt">최근 신호</h3>
+        <h3 class="mt">최근 신호 <span class="muted small" v-if="recent.signals && recent.signals.length">{{ recent.signals.length }}개 (최대 100개) · 5개 넘으면 표 안에서 스크롤</span></h3>
+        <div class="signal-scroll">
         <table>
           <thead><tr><th>시각</th><th>마켓</th><th>신호</th><th>종가</th><th>사유</th></tr></thead>
           <tbody>
-            <tr v-for="s in recent.signals" :key="s.time + s.market"><td>{{ fmtTime(s.time) }}</td><td>{{ s.market }}</td><td><span class="pill" :class="'sig-' + s.action.toLowerCase()">{{ actionLabel(s.action) }}</span></td><td>{{ krw(s.price) }}</td><td class="muted small">{{ s.reason }}</td></tr>
+            <tr v-for="s in recent.signals" :key="s.id"><td>{{ fmtTime(s.time) }}</td><td>{{ s.market }}</td><td><span class="pill" :class="'sig-' + s.action.toLowerCase()">{{ actionLabel(s.action) }}</span></td><td>{{ krw(s.price) }}</td><td class="muted small">{{ s.reason }}</td></tr>
           </tbody>
         </table>
+        </div>
       </div>
     </section>
 
@@ -483,9 +485,9 @@
       <h3>이벤트 로그 <span class="muted small">{{ logs.length }}개 표시{{ logsHasMore ? ' · 아래로 내리면 이전 로그를 더 불러옵니다' : (logs.length ? ' · 끝' : '') }}</span></h3>
       <div class="row wrap logfilter">
         <select v-model="logLevel" @change="loadLogs"><option value="">전체 레벨</option><option value="INFO">정보</option><option value="WARNING">경고</option><option value="ERROR">오류</option></select>
-        <input type="date" v-model="logFilter.from" @change="loadLogs" title="시작일">
+        <input type="date" v-model="logFilter.from" @change="onLogRangeChange" title="시작일 (기본: 오늘-7일)">
         <span class="muted">~</span>
-        <input type="date" v-model="logFilter.to" @change="loadLogs" title="종료일 (포함)">
+        <input type="date" v-model="logFilter.to" @change="onLogRangeChange" title="종료일 (포함, 기본: 오늘)">
         <input v-model.trim="logFilter.q" placeholder="이벤트·메시지 검색" @keyup.enter="loadLogs" style="min-width:170px">
         <button class="small" @click="loadLogs">조회</button>
         <button class="small" @click="resetLogFilter">초기화</button>

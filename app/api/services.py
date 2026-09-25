@@ -252,13 +252,14 @@ class DashboardService:
             "series": [{"time": _iso(t), "equity": e} for t, e in points[::step]],
         }
 
-    def recent(self, mode: str, limit: int = 20) -> dict[str, Any]:
+    def recent(self, mode: str, limit: int = 20, *, signal_limit: int | None = None) -> dict[str, Any]:
         repo = self.repo(mode)
         return {
+            # id: 캔들 단위가 달라도(1m·15m) 시각·마켓이 같은 신호가 생기므로 화면 행 구분용으로 준다
             "signals": [
-                {"time": _iso(s.time), "market": s.market, "action": s.action, "price": s.price, "reason": s.reason,
-                 "strategy": s.strategy, "indicators": s.indicators}
-                for s in repo.recent_signals(limit)
+                {"id": s.id, "time": _iso(s.time), "market": s.market, "action": s.action, "price": s.price,
+                 "reason": s.reason, "strategy": s.strategy, "indicators": s.indicators}
+                for s in repo.recent_signals(signal_limit or limit)
             ],
             "orders": [
                 {"time": _iso(o.created_at), "market": o.market, "side": o.side, "status": o.status,

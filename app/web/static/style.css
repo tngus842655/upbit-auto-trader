@@ -125,9 +125,11 @@ table.history { table-layout: fixed; width: 100%; }
 table.history td, table.history th { overflow: hidden; }
 td.ellipsis { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
 .history-scroll { max-height: 418px; overflow-y: auto; overflow-x: hidden; }  /* 헤더 + 10줄 */
-.history-scroll thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+.signal-scroll { max-height: 196px; overflow-y: auto; }  /* 대시보드 '최근 신호': 헤더 + 5줄 */
+.history-scroll thead th, .signal-scroll thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
 
 /* ---------- 로그 탭 ---------- */
 .logfilter { margin-bottom: 8px; }
 .logfilter input[type=date] { width: 150px; }
-.logscroll { max-height: 72vh; overflow-y: auto; }
+/* 상단바·탭·카드 제목·필터·여백 합(약 256px) + 여유 24px → 페이지는 안 밀리고 목록만 스크롤 */
+.logscroll { max-height: calc(100vh - 280px); overflow-y: auto; }

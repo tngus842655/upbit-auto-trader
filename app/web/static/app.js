@@ -4,6 +4,10 @@
   let equityChart = null; // 자산 곡선 Chart.js 인스턴스 (반응형 상태 밖 — Proxy 로 감싸면 Chart.js 내부가 깨진다)
   let btChart = null; // 백테스트 자산 곡선
   const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  // 로그 탭 기본 기간: 오늘-7일 ~ 오늘 (서버가 KST 날짜로 해석하고 끝 날짜를 포함한다)
+  const recentWeek = () => { const d = new Date(); d.setDate(d.getDate() - 7); return { from: isoDate(d), to: isoDate(new Date()) }; };
+  // 대시보드 표는 15개씩, '최근 신호' 표만 100개 (5줄 넘으면 표 안에서 스크롤)
+  const RECENT_URL = "/api/recent?limit=15&signal_limit=100";
 
   const RISK_LABELS = {
     position_fraction: "현금 사용 비율 (%)", max_order_amount: "거래당 최대 투자금 (KRW)", max_position_ratio: "자산 대비 포지션 상한 (%)",
@@ -75,7 +79,8 @@
           { id: "pockets", label: "포켓 · 자산 이전" }, { id: "logs", label: "로그" },
         ],
         status: {}, balance: {}, perf: {}, recent: {}, latestSignal: null, logs: [], logLevel: "",
-        logFilter: { from: "", to: "", q: "" }, logsHasMore: false, logsLoading: false,
+        logFilter: { ...recentWeek(), q: "" }, logsHasMore: false, logsLoading: false,
+        logRangeAuto: true,  // 기간이 기본값(최근 7일)이면 자정이 지나도 오늘 기준으로 따라간다. 날짜를 직접 고르면 false
         meta: { available: {}, schemas: {}, intervals: [], risk_schema: {} },
         settingsVersion: 0, settingsHistory: [], form: null, saving: false, saveResult: null, formErrors: [],
         pockets: {}, transfer: { direction: "to_main", amount: 0, bot_pocket_uuid: null }, transferResult: null,
@@ -220,7 +225,7 @@
       async loadAll() {
         try {
           const [status, balance, perf, recent] = await Promise.all([
-            this.api("/api/status"), this.api("/api/balance"), this.api("/api/performance"), this.api("/api/recent?limit=15"),
+            this.api("/api/status"), this.api("/api/balance"), this.api("/api/performance"), this.api(RECENT_URL),
           ]);
           this.status = status; this.balance = balance; this.perf = perf; this.recent = recent;
           this.latestSignal = recent.signals && recent.signals.length ? recent.signals[0] : null;
@@ -229,7 +234,7 @@
         this.loadStrategyMeta();
       },
       async refreshLight() {
-        try { const [perf, recent] = await Promise.all([this.api("/api/performance"), this.api("/api/recent?limit=15")]); this.perf = perf; this.recent = recent; this.latestSignal = recent.signals && recent.signals.length ? recent.signals[0] : null; this.renderChart(); } catch (e) { /* 폴링 실패는 조용히 */ }
+        try { const [perf, recent] = await Promise.all([this.api("/api/performance"), this.api(RECENT_URL)]); this.perf = perf; this.recent = recent; this.latestSignal = recent.signals && recent.signals.length ? recent.signals[0] : null; this.renderChart(); } catch (e) { /* 폴링 실패는 조용히 */ }
         if (!this.wsConnected) { try { this.status = await this.api("/api/status"); this.balance = await this.api("/api/balance"); } catch (e) { /* noop */ } }
       },
       async loadStrategyMeta() {
@@ -460,7 +465,8 @@
         if (beforeId) p.set("before_id", String(beforeId));
         return `/api/logs?${p.toString()}`;
       },
-      logFilterActive() { return !!(this.logFilter.from || this.logFilter.to || this.logFilter.q); },
+      // 사용자가 직접 건 필터(검색어·직접 고른 기간)가 있는지 — 기본 기간(최근 7일)은 필터로 치지 않는다
+      logFilterActive() { return !!(this.logFilter.q || (!this.logRangeAuto && (this.logFilter.from || this.logFilter.to))); },
       async loadLogs() {
         this.logsLoading = true;
         try { const r = await this.api(this.logQuery()); this.logs = r.items; this.logsHasMore = r.has_more; }
@@ -477,7 +483,8 @@
         this.logsLoading = false;
       },
       onLogScroll(ev) { const el = ev.target; if (el.scrollHeight - el.scrollTop - el.clientHeight < 80) this.loadMoreLogs(); },
-      resetLogFilter() { this.logFilter = { from: "", to: "", q: "" }; this.logLevel = ""; this.loadLogs(); },
+      onLogRangeChange() { this.logRangeAuto = false; this.loadLogs(); },
+      resetLogFilter() { this.logFilter = { ...recentWeek(), q: "" }; this.logLevel = ""; this.logRangeAuto = true; this.loadLogs(); },
       // ---------- 실시간
       connectWs() {
         if (this.ws) { try { this.ws.close(); } catch (e) { /* noop */ } this.ws = null; }
@@ -508,8 +515,12 @@
     mounted() {
       this.loadAll(); this.connectWs(); this.loadLogs(); this.loadPockets();
       this.timers.push(setInterval(() => this.refreshLight(), 15000));
-      // 로그 자동 갱신은 첫 페이지·필터 없음일 때만 (더 보기로 내려간 상태를 덮어쓰지 않도록)
-      this.timers.push(setInterval(() => { if (this.tab === "logs" && this.logs.length <= 100 && !this.logFilterActive()) this.loadLogs(); }, 15000));
+      // 로그 자동 갱신은 첫 페이지·직접 건 필터 없음일 때만 (더 보기로 내려간 상태를 덮어쓰지 않도록)
+      this.timers.push(setInterval(() => {
+        if (this.tab !== "logs" || this.logs.length > 100 || this.logFilterActive()) return;
+        if (this.logRangeAuto) Object.assign(this.logFilter, recentWeek());
+        this.loadLogs();
+      }, 15000));
     },
   }).mount("#app");
 })();

@@ -143,8 +143,12 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
         return await service.performance(mode)
 
     @app.get("/api/recent")
-    async def api_recent(mode: str = Depends(mode_param), limit: int = Query(20, ge=1, le=200)) -> dict[str, Any]:
-        return service.recent(mode, limit)
+    async def api_recent(
+        mode: str = Depends(mode_param), limit: int = Query(20, ge=1, le=200),
+        signal_limit: int | None = Query(None, ge=1, le=200),
+    ) -> dict[str, Any]:
+        """표마다 최근 limit 개. 신호만 따로 더 받을 때 signal_limit (대시보드 '최근 신호' 표는 100개를 스크롤)."""
+        return service.recent(mode, limit, signal_limit=signal_limit)
 
     @app.get("/api/orders")
     async def api_orders(mode: str = Depends(mode_param), limit: int = Query(50, ge=1, le=500)) -> list[dict[str, Any]]:
