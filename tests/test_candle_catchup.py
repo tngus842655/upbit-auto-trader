@@ -60,3 +60,26 @@ async def test_candle_gap_is_refilled(make_settings) -> None:
     assert any(e.event == "candle_gap" for e in h.repo.recent_logs(20))
     assert max(count for _, count in h.client.candle_calls) >= 14  # 공백을 덮을 만큼 다시 조회
     assert h.engine.stats.stale_signals_skipped >= 1  # 메운 캔들의 신호는 기록만
+
+
+async def test_heartbeat_api_ok_reflects_recent_api_errors(make_settings) -> None:
+    """감사 LOW-1 — api_ok 는 '오류가 한 번도 없었거나 캔들 점검을 한 적 있음' 이 아니라 최근 5분간 API 오류 유무다."""
+    from app.core.exceptions import UpbitNetworkError
+
+    h = Harness(make_settings)
+    await h.engine.warmup()
+    h.now = T0 + timedelta(hours=13, seconds=5)
+    h.engine.write_heartbeat("RUNNING")
+    assert h.repo.read_engine_status().api_ok is True and h.engine.api_ok is True
+
+    async def broken(*_a, **_k):
+        raise UpbitNetworkError("down")
+
+    h.client.get_candles = broken  # type: ignore[method-assign]
+    await h.engine.process_closed_candles(h.now)
+    h.engine.write_heartbeat("RUNNING")
+    # 조치 전: 캔들 점검 이력만 있으면 True 였다
+    assert h.engine.api_ok is False and h.repo.read_engine_status().api_ok is False
+    h.now += timedelta(seconds=301)  # 오류 없이 5분이 지나면 다시 정상
+    h.engine.write_heartbeat("RUNNING")
+    assert h.engine.api_ok is True and h.repo.read_engine_status().api_ok is True

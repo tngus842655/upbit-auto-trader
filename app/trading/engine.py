@@ -182,6 +182,9 @@ class TradingEngine:
         self.price_loop_backoff = 1.0
         self.price_loop_max_backoff = 60.0
         self.price_stale_alert_seconds = 120.0  # 포지션이 있는데 이만큼 시세가 없으면 알림
+        # 하트비트 api_ok: 최근 api_error_window 초 안에 거래소 API 오류가 없었는지 (감사 LOW-1)
+        self.api_error_window = 300.0
+        self.last_api_error_at: datetime | None = None
         # 메인 루프 단계별 예외 격리 (감사 HIGH-6): 연속 실패가 쌓이면 안전 모드(신규 진입 중단, 청산 감시만)
         self.safe_mode = False
         self.safe_mode_after_failures = 10
@@ -289,6 +292,7 @@ class TradingEngine:
                 candles = await self.client.get_candles(market, self.interval, count=self.refresh_candles)
             except TraderError as exc:
                 self.stats.errors += 1
+                self._note_api_error(now)
                 log.error("%s 캔들 조회 실패: %s", market, exc)
                 self.repo.log("ERROR", "candle_fetch_failed", f"{market}: {exc}")
                 self._notify(EventKind.API_ERROR, f"캔들 조회 실패 {market}", str(exc), key=f"candle:{market}")
@@ -389,6 +393,7 @@ class TradingEngine:
             candles = await self._fetch_candles(market, count)
         except TraderError as exc:
             self.stats.errors += 1
+            self._note_api_error(now)
             log.error("%s 공백 메우기 실패: %s", market, exc)
             return new_times
         more = self.state.merge_candles(market, candles, now)
@@ -703,6 +708,7 @@ class TradingEngine:
                     self.state.set_last_price(ticker.market, ticker.trade_price, now)
             except TraderError as exc:
                 self.stats.errors += 1
+                self._note_api_error(now)
                 log.error("현재가 보정 실패: %s", exc)
         return self.state.mark_prices()
 
@@ -774,6 +780,16 @@ class TradingEngine:
         times = [t for s in self.state.prices.values() for t in (s.last_time, s.book_time) if t is not None]
         return max(times) if times else None
 
+    def _note_api_error(self, now: datetime | None = None) -> None:
+        self.last_api_error_at = now or self.clock()
+
+    @property
+    def api_ok(self) -> bool:
+        """최근 api_error_window 초 안에 거래소 REST 오류(캔들·현재가 조회 실패)가 없었으면 True (감사 LOW-1)."""
+        if self.last_api_error_at is None:
+            return True
+        return (self.clock() - self.last_api_error_at).total_seconds() > self.api_error_window
+
     def write_heartbeat(self, status: str | None = None, message: str = "") -> None:
         if status is None:
             status = "PAUSED" if self.paused else ("RUNNING" if self.status == "running" else self.status.upper())
@@ -781,7 +797,7 @@ class TradingEngine:
         risk_snapshot = self.risk.snapshot() if isinstance(self.risk, RiskManager) else None
         self._write_status_safely(
             status=status, strategy=self.strategy.name, markets=list(self.markets), interval=self.interval.value,
-            started_at=self.stats.started_at, api_ok=self.stats.errors == 0 or self.stats.last_candle_check is not None,
+            started_at=self.stats.started_at, api_ok=self.api_ok,
             ws_status=self.ws_status, last_data_at=self.last_data_at(), last_candle_at=self.stats.last_candle_check,
             last_trade_at=self.last_trade_at, equity=equity, cash=self.portfolio.cash,
             message=message or ("재시작 필요: 마켓/캔들 단위 변경" if self.restart_required else ""),
