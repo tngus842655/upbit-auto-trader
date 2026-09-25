@@ -36,6 +36,21 @@ class TestLiveGuardFlags:
         assert s.trading_mode is TradingMode.BACKTEST
         assert s.is_live_trading_allowed is False
 
+    @pytest.mark.parametrize("raw", ["1", "yes", "on", "Y", "t", "TRUE ", "enabled"])
+    def test_live_flag_rejects_loose_truthy_strings(self, make_settings, raw: str) -> None:
+        """감사 LOW-4 — 실제 자금 스위치는 정확히 true/false 만 받는다 (pydantic 기본 파싱의 1/yes/on 거부)."""
+        if raw.strip().lower() == "true":
+            assert make_settings(trading_mode="LIVE", live_trading_enabled=raw).is_live_trading_allowed is True
+            return
+        with pytest.raises(Exception, match="true 또는 false"):
+            make_settings(live_trading_enabled=raw)
+
+    def test_live_flag_accepts_exact_strings_and_bools(self, make_settings) -> None:
+        assert make_settings(live_trading_enabled="false").live_trading_enabled is False
+        assert make_settings(live_trading_enabled="").live_trading_enabled is False
+        assert make_settings(live_trading_enabled="true").live_trading_enabled is True
+        assert make_settings(live_trading_enabled=False).live_trading_enabled is False
+
     def test_both_conditions_allow_live(self, make_settings) -> None:
         s = make_settings(trading_mode="LIVE", live_trading_enabled=True)
         assert s.is_live_trading_allowed is True

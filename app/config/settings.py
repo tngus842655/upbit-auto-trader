@@ -258,6 +258,19 @@ class Settings(BaseSettings):
             return parse_params_text(value)
         return value
 
+    @field_validator("live_trading_enabled", mode="before")
+    @classmethod
+    def _strict_live_flag(cls, value: Any) -> bool:
+        """실제 자금 스위치는 ``true`` / ``false`` 만 받는다 — pydantic 기본 파싱의 1/yes/on/y/t 는 거부 (LOW-4)."""
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        text = str(value).strip().lower()
+        if text in ("true", "false", ""):
+            return text == "true"
+        raise ValueError(f"LIVE_TRADING_ENABLED 는 true 또는 false 만 허용합니다 (입력: {value!r})")
+
     @field_validator("candle_interval")
     @classmethod
     def _validate_interval(cls, value: str) -> str:
