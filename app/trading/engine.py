@@ -64,6 +64,10 @@ Clock = Callable[[], datetime]
 Sleeper = Callable[[float], Awaitable[None]]
 
 
+#: 경계가 UTC 고정 간격으로 정렬되지 않는 캔들 — 엔진(실시간)에서는 쓰지 않는다 (감사 LOW-5)
+UNSUPPORTED_ENGINE_INTERVALS = frozenset({"1w", "1M", "1y"})
+
+
 def next_boundary(now: datetime, interval_seconds: int, grace_seconds: float) -> datetime:
     """다음 캔들 경계 + grace. 캔들은 UTC 기준 간격으로 정렬된다."""
     epoch = int(now.timestamp())
@@ -149,6 +153,12 @@ class TradingEngine:
         self.client = client
         self.markets = list(markets or settings.markets)
         self.interval = CandleInterval.parse(interval or settings.candle_interval)
+        if self.interval.value in UNSUPPORTED_ENGINE_INTERVALS:
+            # next_boundary 가 epoch // 초 로 경계를 잡아 업비트의 주(월요일)·월·연 시작과 어긋난다 (감사 LOW-5)
+            raise ConfigError(
+                f"엔진은 {self.interval.value} 캔들을 지원하지 않습니다 (주·월·연 경계 계산 미지원). "
+                "분·시간·일 캔들을 쓰고, 주·월·연은 백테스트에서만 쓰세요"
+            )
         self.state = MarketState(self.interval, price_max_age_seconds=settings.price_max_age_seconds)
         self.ws_factory = ws_factory
         self.clock = clock

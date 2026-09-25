@@ -237,3 +237,16 @@ async def test_run_loop_with_duration_writes_start_stop_logs(make_settings) -> N
     assert h.client.ticker_calls >= 1
     assert h.repo.count_rows(BotLog) >= 2
     assert CandleInterval.parse("60m") is h.engine.interval
+
+
+@pytest.mark.parametrize("interval", ["1w", "1M", "1y"])
+def test_engine_rejects_calendar_intervals(make_settings, interval: str) -> None:
+    """감사 LOW-5 — 주·월·연 캔들은 경계 계산이 업비트와 어긋나므로 엔진이 설정 오류로 거부한다."""
+    from app.core.exceptions import ConfigError
+
+    h = Harness(make_settings)
+    with pytest.raises(ConfigError, match="지원하지 않습니다"):
+        TradingEngine(h.settings, strategy=h.strategy, portfolio=h.portfolio, broker=h.broker, risk=h.engine.risk,
+                      repo=h.repo, client=h.client, interval=interval)
+    assert TradingEngine(h.settings, strategy=h.strategy, portfolio=h.portfolio, broker=h.broker, risk=h.engine.risk,
+                         repo=h.repo, client=h.client, interval="1d").interval.value == "1d"
