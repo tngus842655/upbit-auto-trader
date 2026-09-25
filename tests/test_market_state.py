@@ -21,6 +21,23 @@ def hourly(n: int, start: datetime = T0, price: float = 100.0):
 
 
 class TestCandles:
+    def test_merge_rejects_inconsistent_candles(self) -> None:
+        """감사 MEDIUM-13 — 고저가 시가·종가와 모순되는 캔들 응답은 MarketDataError 로 거부하고 상태를 바꾸지 않는다."""
+        from app.core.exceptions import MarketDataError
+
+        state = MarketState(CandleInterval.M60, max_rows=100)
+        now = T0 + timedelta(hours=5, minutes=30)
+        assert len(state.merge_candles("KRW-BTC", hourly(4), now)) == 4
+        broken = hourly(6)
+        broken[4] = broken[4].model_copy(update={"high_price": 50.0})  # 고가 < 저가
+        with pytest.raises(MarketDataError, match="고가/저가"):
+            state.merge_candles("KRW-BTC", broken, now)
+        assert len(state.frame("KRW-BTC")) == 4  # 이전 캔들은 그대로
+        zero = hourly(6)
+        zero[3] = zero[3].model_copy(update={"low_price": 0.0, "opening_price": 0.0})
+        with pytest.raises(MarketDataError, match="0 이하"):
+            state.merge_candles("KRW-BTC", zero, now)
+
     def test_merge_reports_new_closed_candles_only(self) -> None:
         state = MarketState(CandleInterval.M60, max_rows=100)
         now = T0 + timedelta(hours=5, minutes=30)  # 05:00 캔들은 진행 중

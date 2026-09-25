@@ -25,10 +25,11 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+import pandas as pd
 from pydantic import ValidationError
 
 from app.config.settings import Settings, TradingMode
-from app.core.exceptions import ConfigError, TraderError
+from app.core.exceptions import ConfigError, MarketDataError, TraderError
 from app.database.repository import Repository
 from app.exchange.models import KST, CandleInterval
 from app.exchange.upbit_client import UpbitClient
@@ -38,6 +39,7 @@ from app.notify.manager import NotificationManager
 from app.risk.base import RiskPolicy
 from app.risk.manager import RiskManager
 from app.strategy.base import Signal, Strategy
+from app.strategy.data import detect_price_anomalies
 from app.trading.live_broker import LiveBroker
 from app.trading.market_state import MarketState
 from app.trading.orders import Order, OrderRequest, OrderStatus, PaperBroker
@@ -82,6 +84,8 @@ class EngineStats:
     orders_resolved: int = 0  # 미확정 주문을 후속 조회로 확정한 수
     price_stream_restarts: int = 0  # 시세 스트림 재연결 횟수
     stale_signals_skipped: int = 0  # 정체 뒤 실행하지 않고 기록만 한 오래된 신호
+    anomalous_signals_held: int = 0  # 이상치(급등락) 캔들이라 실행하지 않고 기록만 한 신호
+    invalid_candle_batches: int = 0  # 무결성 검사에서 거부한 캔들 응답
     loop_step_failures: int = 0  # 메인 루프 단계 실패(격리되어 계속 진행)
     risk_rejections: int = 0
     exits_triggered: int = 0
@@ -289,7 +293,18 @@ class TradingEngine:
                 self.repo.log("ERROR", "candle_fetch_failed", f"{market}: {exc}")
                 self._notify(EventKind.API_ERROR, f"캔들 조회 실패 {market}", str(exc), key=f"candle:{market}")
                 continue
-            new_times = self.state.merge_candles(market, candles, now)
+            try:
+                new_times = self.state.merge_candles(market, candles, now)
+            except MarketDataError as exc:
+                # 거래소 응답이 깨졌거나(고저 모순·0 가격) 간격이 어긋남 → 지표에 넣지 않고 다음 점검에서 다시 받는다
+                # (감사 MEDIUM-13)
+                self.stats.errors += 1
+                self.stats.invalid_candle_batches += 1
+                log.error("%s 캔들 무결성 오류 → 이번 응답 무시: %s", market, exc)
+                self._log_safely("ERROR", "candle_invalid", f"{market}: {exc}")
+                self._notify(EventKind.API_ERROR, f"캔들 데이터 이상 {market}", str(exc),
+                             key=f"candle_invalid:{market}")
+                continue
             if not new_times:
                 continue
             gaps = self.state.find_gaps(market)
@@ -312,8 +327,37 @@ class TradingEngine:
                 if late > self.interval.seconds + self.settings.candle_grace_seconds:
                     self._skip_stale_signal(signal, f"신호 캔들이 닫힌 지 {late:.0f}초 지남 (한 인터벌 초과)")
                     continue
+                jump = self._anomalous_jump(window)
+                if jump is not None:
+                    self._hold_anomalous_signal(signal, jump)
+                    continue
                 await self._on_signal(signal, now)
         return produced
+
+    def _anomalous_jump(self, window: pd.DataFrame) -> float | None:
+        """마지막 캔들이 직전 종가 대비 candle_anomaly_pct 넘게 튀었으면 그 변동률, 아니면 None (감사 MEDIUM-13)."""
+        limit = float(getattr(self.settings, "candle_anomaly_pct", 0.3))
+        if len(window) < 2 or limit <= 0:
+            return None
+        flagged = detect_price_anomalies(window.iloc[-2:], max_pct_change=limit)
+        if not bool(flagged.iloc[-1]):
+            return None
+        prev, last = float(window["close"].iloc[-2]), float(window["close"].iloc[-1])
+        return (last / prev - 1) if prev else None
+
+    def _hold_anomalous_signal(self, signal: Signal, jump: float) -> None:
+        """이상치 캔들의 신호는 기록만 하고 실행하지 않는다 (데이터 오류·플래시 크래시 방어). 청산 감시는 계속된다."""
+        self.stats.signals += 1
+        self.stats.anomalous_signals_held += 1
+        self.repo.save_signal(signal, self.interval.value)
+        limit_pct = self.settings.candle_anomaly_pct * 100
+        why = f"직전 종가 대비 {jump * 100:+.1f}% 튄 캔들 (이상치 의심, 한도 ±{limit_pct:.0f}%)"
+        log.warning("이상치 캔들 신호 보류 %s %s [%s]: %s", signal.market, signal.time.isoformat(),
+                    signal.action.value, why)
+        self._log_safely("WARNING", "candle_anomaly",
+                         f"{signal.market} {signal.action.value} @ {signal.time.isoformat()}: {why}", signal.to_dict())
+        self._notify(EventKind.API_ERROR, f"이상치 캔들 {signal.market}",
+                     f"{why} — 신호 {signal.action.value} 실행 보류", key=f"candle_anomaly:{signal.market}")
 
     def _skip_stale_signal(self, signal: Signal, why: str) -> None:
         """오래된 신호는 처리된 것으로 기록만 하고(재시작 후에도 실행되지 않게) 주문하지 않는다."""
@@ -1054,6 +1098,7 @@ class TradingEngine:
             "orders_rejected": s.orders_rejected, "orders_unknown": s.orders_unknown,
             "orders_resolved": s.orders_resolved, "price_stream_restarts": s.price_stream_restarts,
             "stale_signals_skipped": s.stale_signals_skipped, "loop_step_failures": s.loop_step_failures,
+            "anomalous_signals_held": s.anomalous_signals_held, "invalid_candle_batches": s.invalid_candle_batches,
             "safe_mode": self.safe_mode,
             "risk_rejections": s.risk_rejections,
             "snapshots": s.snapshots, "price_updates": s.price_updates, "errors": s.errors,

@@ -144,6 +144,8 @@ class Settings(BaseSettings):
     snapshot_interval_seconds: int = Field(default=300, ge=10, description="자산 스냅샷 주기(초)")
     candle_grace_seconds: float = Field(default=3.0, ge=0, le=60, description="캔들 경계 후 확정 대기(초)")
     price_max_age_seconds: float = Field(default=30.0, gt=0, description="이보다 오래된 시세로는 체결하지 않음")
+    candle_anomaly_pct: float = Field(default=0.3, gt=0, le=5,
+                                      description="직전 종가 대비 이 비율 넘게 튄 캔들은 이상치로 보고 신호 실행 보류")
     exit_confirm_ticks: int = Field(default=2, ge=1, le=10,
                                     description="청산 조건이 연속 이만큼의 시세에서 관측돼야 매도 (단일 이상 틱 방어)")
 

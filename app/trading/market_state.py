@@ -15,7 +15,7 @@ import pandas as pd
 
 from app.exchange.models import Candle, CandleInterval
 from app.exchange.ws_models import WsMessage, WsOrderbook, WsTicker, WsTrade
-from app.strategy.data import candles_to_dataframe, drop_unclosed
+from app.strategy.data import candles_to_dataframe, drop_unclosed, validate_candles
 
 
 @dataclass
@@ -69,6 +69,8 @@ class MarketState:
         incoming = drop_unclosed(incoming, self.interval, now)
         if incoming.empty:
             return []
+        # 0 이하 가격·고저 모순·간격 오류 캔들은 지표에 넣지 않는다 — MarketDataError 로 거부 (감사 MEDIUM-13)
+        validate_candles(incoming, interval=self.interval)
         existing = self.candles.get(market)
         if existing is None or existing.empty:
             merged = incoming

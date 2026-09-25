@@ -89,6 +89,7 @@ copy .env.example .env      # Windows
 | `RISK_TRAILING_STOP_PCT` | 없음 | 보유 중 최고가 대비 하락률로 청산 |
 | `RISK_PRICE_DEVIATION_LIMIT` | `0.10` | 신호 캔들 종가와 현재 시세의 괴리가 이보다 크면 진입 안 함 |
 | `RISK_COOLDOWN_SECONDS` | `0` | 청산 후 같은 마켓 재진입 대기(초) |
+| `CANDLE_ANOMALY_PCT` | `0.3` | 직전 종가 대비 이 비율(30%) 넘게 튄 캔들은 이상치로 보고 그 캔들의 신호를 실행하지 않는다(기록·알림만). 고저 모순·0 가격 캔들 응답은 지표에 넣지 않고 다음 점검에서 다시 받는다 |
 | `EXIT_CONFIRM_TICKS` | `2` | 손절·익절·추적 손절 조건이 연속 이만큼의 시세에서 관측돼야 매도(단일 이상 틱 방어). 캔들 경계의 REST 보정 점검은 즉시 |
 | `PRICE_MAX_AGE_SECONDS` | `30` | 이보다 오래된 시세로는 체결하지 않음 — PAPER·LIVE 모두 시세가 없거나 오래되면 주문을 보류하고 거부로 기록 |
 | `LOG_LEVEL` / `LOG_DIR` | `INFO` / `logs` | 로그 레벨, 로그 폴더 (`logs/trader.log`, 10MB×5 회전) |
