@@ -211,8 +211,24 @@ def test_kill_uses_pid(api, monkeypatch) -> None:
     repo.write_engine_status(status="RUNNING", pid=777)
     killed = []
     monkeypatch.setattr(server_module, "kill_engine", lambda pid: killed.append(pid) or True)
+    # 감사 MEDIUM-5: PID 의 명령줄이 우리 엔진일 때만 종료한다
+    monkeypatch.setattr(server_module, "process_cmdline", lambda pid: "C:/py/python.exe -m app.main run")
     r = client.post("/api/bot/kill", json={})
     assert r.status_code == 200 and killed == [777]
+    assert repo.read_engine_status().status == "STOPPED"
+    # PID 가 다른 프로세스로 재사용됐으면 종료하지 않는다 (409, 상태 유지)
+    repo.write_engine_status(status="RUNNING", pid=778)
+    monkeypatch.setattr(server_module, "process_cmdline", lambda pid: "notepad.exe C:/memo.txt")
+    r = client.post("/api/bot/kill", json={})
+    assert r.status_code == 409 and killed == [777] and "엔진 프로세스가 아닙니다" in r.json()["detail"]
+    assert repo.read_engine_status().status == "RUNNING"
+    # 명령줄 확인 실패("")도 종료하지 않는다
+    monkeypatch.setattr(server_module, "process_cmdline", lambda pid: "")
+    assert client.post("/api/bot/kill", json={}).status_code == 409 and killed == [777]
+    # 프로세스가 이미 없으면 상태만 STOPPED 로 정리
+    monkeypatch.setattr(server_module, "process_cmdline", lambda pid: None)
+    r = client.post("/api/bot/kill", json={})
+    assert r.status_code == 200 and r.json()["killed"] is False and killed == [777]
     assert repo.read_engine_status().status == "STOPPED"
 
 

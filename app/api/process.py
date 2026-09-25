@@ -59,8 +59,46 @@ def start_engine(settings: Settings, mode: str, *, confirm_live: str = "", pytho
     return proc.pid
 
 
+ENGINE_CMD_MARKERS = ("app.main", "run")
+
+
+def process_cmdline(pid: int) -> str | None:
+    """PID 의 명령줄을 OS 도구로 읽는다 (psutil 없이). 프로세스가 없으면 None, 확인에 실패하면 "" (감사 MEDIUM-5)."""
+    if pid <= 0:
+        return None
+    try:
+        if os.name == "nt":
+            script = (
+                f"$p = Get-CimInstance Win32_Process -Filter 'ProcessId={int(pid)}'; "
+                "if ($p) { $p.CommandLine } else { exit 3 }"
+            )
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+                capture_output=True, text=True, timeout=20, check=False,
+            )
+            if result.returncode == 3:
+                return None
+            return (result.stdout or "").strip() if result.returncode == 0 else ""
+        proc_path = Path(f"/proc/{int(pid)}/cmdline")
+        if proc_path.exists():
+            return proc_path.read_bytes().replace(b"\0", b" ").decode(errors="replace").strip()
+        result = subprocess.run(["ps", "-o", "args=", "-p", str(int(pid))], capture_output=True, text=True,
+                                timeout=20, check=False)
+        return result.stdout.strip() if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("프로세스 %s 명령줄 확인 실패: %s", pid, exc)
+        return ""
+
+
+def is_engine_process(cmdline: str | None) -> bool:
+    """명령줄이 우리 엔진(``python -m app.main run``)인지. 프로세스가 없거나(None) 확인 실패("")면 False."""
+    if not cmdline:
+        return False
+    return all(marker in cmdline for marker in ENGINE_CMD_MARKERS)
+
+
 def kill_engine(pid: int) -> bool:
-    """마지막 수단: PID 로 강제 종료. 성공하면 True."""
+    """마지막 수단: PID 로 강제 종료. 성공하면 True. 호출 전에 process_cmdline/is_engine_process 로 대상을 확인할 것."""
     try:
         if os.name == "nt":
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)

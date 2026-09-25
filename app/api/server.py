@@ -24,7 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from app.api.backtests import BacktestRequest, BacktestRunner
-from app.api.process import engine_is_alive, kill_engine, start_engine
+from app.api.process import engine_is_alive, is_engine_process, kill_engine, process_cmdline, start_engine
 from app.api.services import DashboardService, describe_api_error
 from app.config.settings import Settings, TradingMode, get_settings
 from app.core.exceptions import TraderError
@@ -358,10 +358,24 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
         es = repo.read_engine_status()
         if es is None or not es.pid:
             raise HTTPException(status_code=404, detail="엔진 PID 를 알 수 없습니다")
-        ok = kill_engine(int(es.pid))
+        pid = int(es.pid)
+        # 감사 MEDIUM-5: 엔진이 죽은 뒤 같은 PID 를 다른 프로세스가 받았을 수 있다 → 명령줄이 우리 엔진일 때만 종료한다
+        cmdline = process_cmdline(pid)
+        if cmdline is None:
+            repo.write_engine_status(status="STOPPED", message="강제 종료 요청 — 프로세스가 이미 없음")
+            repo.log("WARNING", "dashboard_kill", f"엔진 프로세스 없음 (pid {pid}) → 상태만 STOPPED 로 정리")
+            return {"killed": False, "pid": pid, "reason": "프로세스가 이미 종료됨 — 상태만 STOPPED 로 정리"}
+        if not is_engine_process(cmdline):
+            why = "명령줄을 확인할 수 없어" if cmdline == "" else "엔진 프로세스가 아닙니다(PID 재사용 가능성) —"
+            repo.log("ERROR", "dashboard_kill", f"pid {pid} 종료 거부: {why} 종료하지 않음", {"cmdline": cmdline[:200]})
+            raise HTTPException(
+                status_code=409,
+                detail=f"pid {pid} 는 {why} 종료하지 않았습니다. 작업 관리자(ps)에서 확인 후 직접 종료하세요",
+            )
+        ok = kill_engine(pid)
         repo.write_engine_status(status="STOPPED", message="대시보드에서 강제 종료")
-        repo.log("WARNING", "dashboard_kill", f"엔진 강제 종료 (pid {es.pid})")
-        return {"killed": ok, "pid": es.pid}
+        repo.log("WARNING", "dashboard_kill", f"엔진 강제 종료 (pid {pid})", {"cmdline": cmdline[:200]})
+        return {"killed": ok, "pid": pid}
 
     @app.post("/api/bot/{command}")
     async def api_bot_command(command: str, payload: dict[str, Any] | None = Body(None),
