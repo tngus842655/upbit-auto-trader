@@ -48,7 +48,7 @@ from app.strategy import check_no_lookahead, create_strategy
 from app.strategy.data import candles_to_dataframe, detect_price_anomalies, drop_unclosed, validate_candles
 from app.trading.engine import TradingEngine
 from app.trading.instance_lock import InstanceLock
-from app.trading.live_broker import LiveBroker, portfolio_from_accounts
+from app.trading.live_broker import LiveBroker, merge_saved_positions, portfolio_from_accounts
 from app.trading.live_guard import LIVE_CONFIRM_PHRASE
 from app.trading.orders import PaperBroker
 from app.trading.portfolio import DEFAULT_MIN_ORDER_AMOUNT
@@ -317,6 +317,15 @@ async def build_live_components(settings: Settings, client: UpbitClient, markets
         initial_cash=account_record.initial_cash if account_record else None,
         reference_prices=reference_prices, min_order_amount=DEFAULT_MIN_ORDER_AMOUNT,
     )
+    if account_record is not None:
+        # 재시작: 잔고 스냅샷에는 없는 진입 시각·매수 수수료·기준가를 이전 실행의 DB 포지션에서 되살린다 (감사 LOW-8)
+        saved, _ = repo.restore_portfolio(
+            initial_cash=account_record.initial_cash, fee_rate=settings.paper_fee_rate,
+            min_order_amount=DEFAULT_MIN_ORDER_AMOUNT,
+        )
+        restored = merge_saved_positions(portfolio, saved.positions)
+        if restored:
+            log.info("저장된 포지션 정보 복구(진입 시각·수수료·기준가): %s", restored)
     broker = LiveBroker(client, portfolio, settings, processed_client_ids=repo.processed_client_ids())
     risk = RiskManager(settings.risk_config())
     return db, repo, portfolio, broker, risk, account_record is not None

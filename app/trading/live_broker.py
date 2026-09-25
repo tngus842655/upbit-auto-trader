@@ -104,6 +104,29 @@ def portfolio_from_accounts(
     return portfolio
 
 
+def merge_saved_positions(portfolio: Portfolio, saved: Mapping[str, Position], *, tolerance: float = 0.01) -> list[str]:
+    """거래소 잔고로 만든 포지션에 DB 에 저장돼 있던 진입 시각·매수 수수료(·기준가)를 되살린다 (감사 LOW-8).
+
+    수량이 ``tolerance``(1%) 안에서 같은 마켓만 — 그 사이 매매가 있었으면 저장값은 낡은 것이다.
+    되살린 마켓 목록을 돌려준다.
+    """
+    restored: list[str] = []
+    for market, pos in portfolio.positions.items():
+        old = saved.get(market)
+        if old is None or old.quantity <= 0:
+            continue
+        if abs(pos.quantity - old.quantity) > tolerance * max(pos.quantity, old.quantity):
+            continue
+        pos.opened_at = old.opened_at
+        pos.entry_fee = old.entry_fee
+        if not pos.cost_known and old.avg_price > 0:  # 이전 실행에서 정한 기준가는 유지
+            pos.avg_price = old.avg_price
+            pos.entry_amount = pos.quantity * old.avg_price
+            pos.cost_known = old.cost_known
+        restored.append(market)
+    return restored
+
+
 class LiveBroker:
     """실제 업비트 주문. ``settings`` 의 LIVE 이중 플래그와 클라이언트 잠금을 모두 통과해야 동작한다."""
 

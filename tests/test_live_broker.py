@@ -10,7 +10,7 @@ import pytest
 
 from app.core.exceptions import LiveTradingDisabledError, UpbitAPIError, UpbitNetworkError
 from app.exchange.models import Account, OrderChance, OrderInfo
-from app.trading.live_broker import LiveBroker, make_identifier, portfolio_from_accounts
+from app.trading.live_broker import LiveBroker, make_identifier, merge_saved_positions, portfolio_from_accounts
 from app.trading.market_state import PriceState
 from app.trading.orders import Order, OrderRequest, OrderStatus, OrderType
 from app.trading.portfolio import Portfolio, Position, Side
@@ -627,3 +627,24 @@ class TestPriceGuard:
         fresh = PriceState(M, last_price=100_000_000.0, last_time=NOW - timedelta(seconds=5))
         order = await broker.execute(OrderRequest(M, Side.BUY, amount=10_000, client_id="c3"), fresh, NOW)
         assert order.status is OrderStatus.FILLED
+
+
+def test_merge_saved_positions_restores_entry_details() -> None:
+    """감사 LOW-8 — 재시작 시 거래소 잔고 포지션에 DB 의 진입 시각·매수 수수료·기준가를 되살린다 (수량이 같을 때만)."""
+    accounts = [_account("KRW", "100000", "0"), _account("BTC", "0.01", "100000000"), _account("ETH", "0.5", "0"),
+                _account("XRP", "100", "600")]
+    p = portfolio_from_accounts(accounts, [M, "KRW-ETH", "KRW-XRP"], fee_rate=0.0005,
+                                reference_prices={"KRW-ETH": 5_000_000})
+    opened = NOW - timedelta(days=3)
+    saved = {
+        M: Position(M, 0.01, 100_000_000.0, opened, 1_000_000.0, 500.0),
+        "KRW-ETH": Position("KRW-ETH", 0.5, 4_800_000.0, opened, 2_400_000.0, 0.0, cost_known=False),  # 이전 기준가
+        "KRW-XRP": Position("KRW-XRP", 50.0, 600.0, opened, 30_000.0, 15.0),  # 수량이 다름(그 사이 매매) → 무시
+    }
+    assert merge_saved_positions(p, saved) == [M, "KRW-ETH"]
+    btc = p.position(M)
+    assert btc.opened_at == opened and btc.entry_fee == 500.0 and btc.avg_price == 100_000_000  # 조치 전: 지금·0
+    eth = p.position("KRW-ETH")
+    assert eth.avg_price == 4_800_000 and eth.cost_known is False and eth.entry_amount == pytest.approx(2_400_000)
+    xrp = p.position("KRW-XRP")
+    assert xrp.entry_fee == 0.0 and xrp.opened_at != opened
