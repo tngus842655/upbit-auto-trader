@@ -173,6 +173,23 @@ class TestExits:
         rm.record_trade(trade(7.0))
         assert M not in rm.state.peak_prices
 
+    def test_trailing_stop_judges_against_previous_peak(self) -> None:
+        """감사 MEDIUM-8 — 같은 캔들의 고가로 최고가를 먼저 올려 저가와 비교하지 않는다 (고가→저가 순서 가정 제거)."""
+        rm = unrestricted(trailing_stop_pct=0.10)
+        pos = self.position().position(M)
+        assert rm.check_exits(pos, low=105.0, high=130.0, now=NOW) is None  # 조치 전: 130→117 추적선에 105 가 닿아 청산
+        assert rm.state.peak_prices[M] == 130.0  # 최고가 갱신은 판정 뒤
+        hit = rm.check_exits(pos, low=110.0, high=112.0, now=NOW)
+        assert hit is not None and hit.reason == EXIT_TRAILING_STOP and hit.trigger_price == pytest.approx(117.0)
+
+    def test_take_profit_requires_trade_through(self) -> None:
+        """감사 MEDIUM-8 — 지정가 익절은 고가가 목표가에 닿기만 해서는 체결로 보지 않는다."""
+        rm = unrestricted(take_profit_pct=0.10)
+        pos = self.position().position(M)
+        assert rm.check_exits(pos, low=99.0, high=110.0, now=NOW) is None  # 정확히 터치
+        hit = rm.check_exits(pos, low=99.0, high=110.01, now=NOW)
+        assert hit is not None and hit.reason == EXIT_TAKE_PROFIT and hit.trigger_price == pytest.approx(110.0)
+
     def test_disabled_rules_never_exit(self) -> None:
         rm = unrestricted()
         pos = self.position().position(M)

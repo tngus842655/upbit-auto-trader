@@ -321,7 +321,12 @@ class RiskManager:
     # 청산 감시
     # ------------------------------------------------------------------
     def check_exits(self, position: Position, *, low: float, high: float, now: datetime) -> ExitCheck | None:
-        """손절 → 익절 → 추적 손절 순서. 같은 구간에서 둘 다 닿으면 손절을 먼저 본다(보수적)."""
+        """손절 → 익절 → 추적 손절 순서. 같은 구간에서 둘 다 닿으면 손절을 먼저 본다(보수적).
+
+        캔들(low/high) 단위로 판정할 때의 보수 규칙 (감사 MEDIUM-8): 익절은 고가가 목표가를 **지나가야**(초과) 체결로
+        보고, 추적 손절은 **직전 캔들까지의 최고가**로 판정한 뒤 이번 고가로 최고가를 갱신한다 — 같은 캔들에서 고가가
+        먼저 오고 저가가 나중에 왔다는 낙관적 순서 가정을 하지 않는다. 실시간(틱)은 low=high 라 결과가 같다.
+        """
         cfg = self.config
         market = position.market
         if position.avg_price <= 0:
@@ -339,13 +344,14 @@ class RiskManager:
                 return ExitCheck(market, EXIT_STOP_LOSS, stop)
         if cfg.take_profit_pct is not None:
             target = position.avg_price * (1 + cfg.take_profit_pct)
-            if high >= target:
+            if high > target:  # 터치만으로는 지정가가 대기열 때문에 미체결일 수 있다 → 지나가야 체결
                 return ExitCheck(market, EXIT_TAKE_PROFIT, target)
         if cfg.trailing_stop_pct is not None:
-            peak = max(self.state.peak_prices.get(market, position.avg_price), high)
-            self.state.peak_prices[market] = peak
-            trail = peak * (1 - cfg.trailing_stop_pct)
-            if low <= trail and peak > position.avg_price:
+            prev_peak = self.state.peak_prices.get(market, position.avg_price)
+            trail = prev_peak * (1 - cfg.trailing_stop_pct)
+            hit = low <= trail and prev_peak > position.avg_price
+            self.state.peak_prices[market] = max(prev_peak, high)  # 판정 뒤에 갱신
+            if hit:
                 return ExitCheck(market, EXIT_TRAILING_STOP, trail)
         return None
 

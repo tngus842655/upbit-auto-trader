@@ -23,6 +23,8 @@ from app.backtest import (
 )
 from app.backtest.metrics import cagr, compute_metrics, max_consecutive_losses, sharpe_ratio
 from app.core.exceptions import StrategyError
+from app.risk import RiskConfig
+from app.risk.manager import EXIT_TRAILING_STOP
 from app.strategy import MovingAverageCrossStrategy, Strategy
 from app.strategy.base import ACTION_COLUMN, REASON_COLUMN, StrategyParams
 from app.trading.portfolio import Trade, floor_quantity
@@ -180,6 +182,16 @@ class TestStopsAndTargets:
         assert t.exit_reason == EXIT_TAKE_PROFIT
         assert t.exit_price == pytest.approx(t.entry_price * 1.10)
         assert t.pnl > 0
+
+    def test_trailing_stop_is_conservative_within_candle(self) -> None:
+        """감사 MEDIUM-8 — 급등 캔들(고가 130·저가 105)의 고가 기준 추적선으로는 청산하지 않고 다음 캔들에서 청산."""
+        df = ohlc_frame([100, 100, 100, 100, 110, 100, 100], [101, 101, 101, 101, 130, 101, 101],
+                        [99, 99, 99, 99, 105, 99, 99], [100, 100, 100, 100, 110, 100, 100])
+        cfg = CFG.model_copy(update={"risk": RiskConfig.unrestricted(trailing_stop_pct=0.10)})
+        result = BacktestEngine(cfg).run(df, Scripted({1: "BUY"}))
+        t = result.trades[0]
+        assert t.exit_reason == EXIT_TRAILING_STOP and t.exit_time == df.index[5].to_pydatetime()  # 조치 전: index 4
+        assert t.exit_price == pytest.approx(100 * (1 - 0.001))  # 추적선 117 보다 시가 100 이 낮으니 시가 체결
 
     def test_stop_has_priority_over_target_in_same_candle(self) -> None:
         df = ohlc_frame([100] * 6, [101, 101, 101, 101, 130, 101], [99, 99, 99, 99, 80, 99], [100] * 6)
