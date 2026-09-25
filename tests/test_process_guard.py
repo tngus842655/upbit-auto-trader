@@ -42,3 +42,63 @@ def test_rotate_engine_log_rolls_backups(tmp_path) -> None:
     assert (tmp_path / "engine-paper.log.1").read_bytes().startswith(b"round4")
     assert (tmp_path / "engine-paper.log.3").read_bytes().startswith(b"round2")  # round1 은 밀려나 삭제
     assert rotate_engine_log(tmp_path / "missing.log") is False
+
+
+def test_kill_engine_graceful_then_force(monkeypatch) -> None:
+    """감사 LOW-10 — 먼저 정상 종료 신호를 보내 기다리고, 끝나지 않을 때만 강제 종료한다."""
+    from app.api import process as proc
+
+    sent: list[tuple[int, int]] = []
+    forced: list[int] = []
+    monkeypatch.setattr(proc.os, "kill", lambda pid, sig: sent.append((pid, sig)))
+    monkeypatch.setattr(proc, "_force_kill", lambda pid: forced.append(pid))
+    monkeypatch.setattr(proc, "_wait_exit", lambda pid, timeout: True)
+    assert proc.kill_engine(4242, grace_seconds=1.0) is True
+    assert len(sent) == 1 and sent[0][0] == 4242 and forced == []  # 정상 종료만으로 끝 (조치 전: 바로 taskkill /F)
+    monkeypatch.setattr(proc, "_wait_exit", lambda pid, timeout: False)
+    assert proc.kill_engine(4243, grace_seconds=1.0) is True and forced == [4243]  # 기다려도 안 끝나면 강제
+
+    def boom(pid, sig):
+        raise OSError("no such process group")
+
+    monkeypatch.setattr(proc.os, "kill", boom)
+    assert proc.kill_engine(4244) is True and forced == [4243, 4244]  # 신호를 못 보내면 바로 강제
+
+
+def test_wait_exit_polls_until_gone() -> None:
+    from app.api import process as proc
+
+    alive = iter([True, True, False])
+    clock = {"t": 0.0}
+    assert proc._wait_exit(1, 5.0, alive=lambda pid: next(alive, False), clock=lambda: clock["t"],
+                           sleep=lambda s: clock.__setitem__("t", clock["t"] + s)) is True
+    assert proc._wait_exit(1, 1.0, alive=lambda pid: True, clock=lambda: clock["t"],
+                           sleep=lambda s: clock.__setitem__("t", clock["t"] + s)) is False
+
+
+async def test_install_stop_handlers_requests_engine_stop(make_settings) -> None:
+    """감사 LOW-10 — 종료 시그널을 받으면 엔진 stop 이벤트가 켜져 finally(정지 알림·STOPPED 하트비트)까지 돈다."""
+    import asyncio
+    import signal
+
+    from app.main import install_stop_handlers
+    from tests.test_engine import Harness
+
+    h = Harness(make_settings)
+    installed = install_stop_handlers(h.engine)
+    loop = asyncio.get_running_loop()
+    try:
+        if os.name == "nt":
+            assert "SIGBREAK" in installed
+            handler = signal.getsignal(signal.SIGBREAK)
+            handler(signal.SIGBREAK, None)  # CTRL_BREAK 수신을 흉내 낸다
+            await asyncio.sleep(0)
+            assert h.engine._stop.is_set()
+        else:
+            assert "SIGTERM" in installed and "SIGINT" in installed
+    finally:
+        for name in installed:
+            if os.name == "nt":
+                signal.signal(getattr(signal, name), signal.SIG_DFL)
+            else:
+                loop.remove_signal_handler(getattr(signal, name))

@@ -372,7 +372,7 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
                 status_code=409,
                 detail=f"pid {pid} 는 {why} 종료하지 않았습니다. 작업 관리자(ps)에서 확인 후 직접 종료하세요",
             )
-        ok = kill_engine(pid)
+        ok = await asyncio.to_thread(kill_engine, pid)  # 정상 종료 대기(최대 수 초) 동안 이벤트 루프를 막지 않는다
         repo.write_engine_status(status="STOPPED", message="대시보드에서 강제 종료")
         repo.log("WARNING", "dashboard_kill", f"엔진 강제 종료 (pid {pid})", {"cmdline": cmdline[:200]})
         return {"killed": ok, "pid": pid}

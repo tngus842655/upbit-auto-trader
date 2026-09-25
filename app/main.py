@@ -25,6 +25,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
+import signal
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
@@ -331,6 +333,39 @@ async def build_live_components(settings: Settings, client: UpbitClient, markets
     return db, repo, portfolio, broker, risk, account_record is not None
 
 
+def install_stop_handlers(engine: TradingEngine) -> list[str]:
+    """SIGTERM/SIGINT(POSIX)·CTRL_BREAK(Windows)를 받으면 엔진을 **정상 종료**시킨다 (감사 LOW-10).
+
+    정상 종료 = stop 이벤트 → 루프 종료 → finally 에서 마지막 스냅샷·bot_stop 알림·STOPPED 하트비트.
+    설치한 시그널 이름을 돌려준다. Windows 의 강제 종료(taskkill /F)는 잡을 수 없으므로 대시보드는 먼저 CTRL_BREAK 를
+    보낸다(app.api.process.kill_engine).
+    """
+    loop = asyncio.get_running_loop()
+    installed: list[str] = []
+
+    def request_stop(name: str) -> None:
+        log.warning("%s 수신 → 엔진 정상 종료 요청", name)
+        engine.stop()
+
+    if os.name != "nt":
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                loop.add_signal_handler(sig, request_stop, sig.name)
+                installed.append(sig.name)
+            except (NotImplementedError, RuntimeError, ValueError):
+                continue
+    else:
+        for sig in (getattr(signal, "SIGBREAK", None), signal.SIGTERM):
+            if sig is None:
+                continue
+            try:
+                signal.signal(sig, lambda *_args, _name=sig.name: loop.call_soon_threadsafe(request_stop, _name))
+                installed.append(sig.name)
+            except (ValueError, OSError):
+                continue
+    return installed
+
+
 def acquire_engine_lock(mode: str, base_dir: Path | None = None) -> InstanceLock | None:
     """같은 모드의 엔진이 이미 떠 있으면 None (감사 HIGH-7). 잠금 파일: data/engine-{mode}.lock"""
     lock = InstanceLock((base_dir or PROJECT_ROOT / "data") / f"engine-{mode}.lock")
@@ -422,6 +457,9 @@ async def cmd_run(settings: Settings, args: argparse.Namespace) -> int:
                     ws_factory=lambda subs: UpbitWebSocket(subs, url=settings.upbit_ws_url),
                     runtime=runtime, settings_version=version, notifier=notifier,
                 )
+                installed = install_stop_handlers(engine)
+                if installed:
+                    log.info("종료 시그널 처리 설치: %s", ", ".join(installed))
                 stats = await engine.run(duration_seconds=args.duration or None)
             finally:
                 db.dispose()

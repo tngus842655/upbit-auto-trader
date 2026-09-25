@@ -8,8 +8,10 @@ from __future__ import annotations
 
 import logging
 import os
+import signal
 import subprocess
 import sys
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -81,7 +83,10 @@ def start_engine(settings: Settings, mode: str, *, confirm_live: str = "", pytho
         kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
     else:
         kwargs["start_new_session"] = True
-    proc = subprocess.Popen(cmd, **kwargs)
+    try:
+        proc = subprocess.Popen(cmd, **kwargs)
+    finally:
+        out.close()  # 자식이 핸들을 물려받았으니 부모 쪽은 닫는다 — 시작 횟수만큼 핸들이 새던 문제 (감사 LOW-10)
     log.info("엔진 프로세스 시작: pid=%s mode=%s", proc.pid, mode)
     return proc.pid
 
@@ -124,13 +129,45 @@ def is_engine_process(cmdline: str | None) -> bool:
     return all(marker in cmdline for marker in ENGINE_CMD_MARKERS)
 
 
-def kill_engine(pid: int) -> bool:
-    """마지막 수단: PID 로 강제 종료. 성공하면 True. 호출 전에 process_cmdline/is_engine_process 로 대상을 확인할 것."""
+def _process_alive(pid: int) -> bool:
+    return process_cmdline(pid) is not None
+
+
+def _wait_exit(pid: int, timeout: float, *, poll: float = 0.5, alive=None, clock=time.monotonic,
+               sleep=time.sleep) -> bool:
+    """프로세스가 ``timeout`` 초 안에 끝나면 True."""
+    check = alive or _process_alive
+    deadline = clock() + timeout
+    while clock() < deadline:
+        if not check(pid):
+            return True
+        sleep(poll)
+    return not check(pid)
+
+
+def _force_kill(pid: int) -> None:
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
+    else:
+        os.kill(pid, signal.SIGKILL)
+
+
+def kill_engine(pid: int, *, grace_seconds: float = 8.0) -> bool:
+    """엔진을 내린다: 먼저 정상 종료 신호(POSIX SIGTERM / Windows CTRL_BREAK)를 보내 finally(마지막 스냅샷·정지 알림·
+    STOPPED 하트비트)가 돌게 하고, ``grace_seconds`` 안에 끝나지 않으면 강제 종료한다 (감사 LOW-10).
+    호출 전에 process_cmdline/is_engine_process 로 대상을 확인할 것(MEDIUM-5).
+    """
     try:
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
-        else:
-            os.kill(pid, 15)
+        os.kill(pid, signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGTERM)
+    except OSError as exc:
+        log.warning("정상 종료 신호 실패 pid=%s (%s) → 강제 종료", pid, exc)
+    else:
+        if _wait_exit(pid, grace_seconds):
+            log.info("엔진 pid=%s 정상 종료 확인", pid)
+            return True
+        log.warning("엔진 pid=%s 가 %.0f초 안에 끝나지 않음 → 강제 종료", pid, grace_seconds)
+    try:
+        _force_kill(pid)
         return True
     except OSError as exc:
         log.warning("강제 종료 실패 pid=%s: %s", pid, exc)
