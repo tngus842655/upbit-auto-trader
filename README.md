@@ -89,6 +89,8 @@ copy .env.example .env      # Windows
 | `RISK_TRAILING_STOP_PCT` | 없음 | 보유 중 최고가 대비 하락률로 청산 |
 | `RISK_PRICE_DEVIATION_LIMIT` | `0.10` | 신호 캔들 종가와 현재 시세의 괴리가 이보다 크면 진입 안 함 |
 | `RISK_COOLDOWN_SECONDS` | `0` | 청산 후 같은 마켓 재진입 대기(초) |
+| `EXIT_CONFIRM_TICKS` | `2` | 손절·익절·추적 손절 조건이 연속 이만큼의 시세에서 관측돼야 매도(단일 이상 틱 방어). 캔들 경계의 REST 보정 점검은 즉시 |
+| `PRICE_MAX_AGE_SECONDS` | `30` | 이보다 오래된 시세로는 체결하지 않음 — PAPER·LIVE 모두 시세가 없거나 오래되면 주문을 보류하고 거부로 기록 |
 | `LOG_LEVEL` / `LOG_DIR` | `INFO` / `logs` | 로그 레벨, 로그 폴더 (`logs/trader.log`, 10MB×5 회전) |
 | `DASHBOARD_HOST` / `DASHBOARD_PORT` | `127.0.0.1` / `8000` | 대시보드(`serve`) 바인드 주소·포트. 외부 바인드는 토큰 필수 |
 | `DASHBOARD_TOKEN` | 없음 | 설정하면 대시보드의 **모든** API·WebSocket 에 `X-Auth-Token` 헤더 필요(조회 포함). 없으면 로컬 호스트만 허용 |

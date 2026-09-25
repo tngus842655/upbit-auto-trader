@@ -170,6 +170,10 @@ class TradingEngine:
         self._exit_failures: dict[str, int] = {}
         self.exit_retry_base = 5.0
         self.exit_retry_max = 300.0
+        # 청산 조건은 연속 N번 관측돼야 실행한다 (단일 이상 틱·호가 튐 방어, 감사 MEDIUM-6).
+        # 캔들 경계의 강제 점검(force)은 REST 로 보정한 실제 체결가 기준이라 즉시 실행한다.
+        self.exit_confirm_ticks = max(1, int(getattr(settings, "exit_confirm_ticks", 2)))
+        self._exit_streak: dict[str, tuple[str, int]] = {}
         # 시세 루프: 스트림이 끊기거나 예외가 나도 백오프 후 다시 붙는다 (감사 HIGH-2)
         self.price_loop_backoff = 1.0
         self.price_loop_max_backoff = 60.0
@@ -610,7 +614,16 @@ class TradingEngine:
                 continue
             exit_check = self.risk.check_exits(pos, low=price.mark_price, high=price.mark_price, now=now)
             if exit_check is None:
+                self._exit_streak.pop(market, None)
                 continue
+            streak_reason, streak = self._exit_streak.get(market, (exit_check.reason, 0))
+            streak = streak + 1 if streak_reason == exit_check.reason else 1
+            self._exit_streak[market] = (exit_check.reason, streak)
+            if not force and streak < self.exit_confirm_ticks:
+                log.info("청산 조건 %s %s 관측 %d/%d — 다음 시세에서 다시 확인 (현재 %.0f)", market, exit_check.reason,
+                         streak, self.exit_confirm_ticks, price.mark_price)
+                continue
+            self._exit_streak.pop(market, None)
             self.stats.exits_triggered += 1
             log.info("청산 조건 %s %s: 기준가 %.0f, 현재 %.0f", market, exit_check.reason, exit_check.trigger_price,
                      price.mark_price)

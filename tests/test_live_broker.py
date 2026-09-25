@@ -4,12 +4,14 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
 from app.core.exceptions import LiveTradingDisabledError, UpbitAPIError, UpbitNetworkError
 from app.exchange.models import Account, OrderChance, OrderInfo
 from app.trading.live_broker import LiveBroker, make_identifier, portfolio_from_accounts
+from app.trading.market_state import PriceState
 from app.trading.orders import Order, OrderRequest, OrderStatus, OrderType
 from app.trading.portfolio import Portfolio, Position, Side
 
@@ -68,6 +70,7 @@ class FakeClient:
         self.identifier_lookups: list[str] = []
         self.uuid_lookups = 0
         self.allow = allow
+        self.ticker_error: Exception | None = None  # get_ticker 가 낼 예외 (시세 조회 실패 재현)
 
     @property
     def orders_allowed(self) -> bool:
@@ -80,6 +83,11 @@ class FakeClient:
 
     async def get_order_chance(self, market):
         return self.chance_obj
+
+    async def get_ticker(self, market):
+        if self.ticker_error is not None:
+            raise self.ticker_error
+        return SimpleNamespace(market=market, trade_price=100_000_000.0)
 
     async def create_order(self, params):
         self.created.append(dict(params))
@@ -585,3 +593,37 @@ async def test_execute_and_reconcile_do_not_interleave(make_settings) -> None:
     assert order.status is OrderStatus.FILLED
     assert diff[M]["internal_qty"] == pytest.approx(0.001)  # 동기화는 체결 반영 뒤에 돌았다
     assert portfolio.cash == 500_000 and portfolio.position(M).quantity == 0.01  # 그 뒤 거래소 기준으로 정렬
+
+
+class TestPriceGuard:
+    """감사 MEDIUM-6 — 시세가 없거나 오래됐으면 실제 시장가 주문을 내지 않는다."""
+
+    @staticmethod
+    def _done() -> OrderInfo:
+        return order_info("u1", side="bid", state="done", executed="0.0001", fee="5",
+                          trades=[trade("100000000", "0.0001")])
+
+    async def test_stale_price_is_rejected(self, make_settings) -> None:
+        client = FakeClient(create_results=[self._done()], order_states=[self._done()])
+        broker = LiveBroker(client, Portfolio(1_000_000), armed_settings(make_settings), sleep=no_sleep)
+        stale = PriceState(M, last_price=100_000_000.0, last_time=NOW - timedelta(seconds=120))
+        order = await broker.execute(OrderRequest(M, Side.BUY, amount=10_000, client_id="c1"), stale, NOW)
+        assert order.status is OrderStatus.REJECTED and "시세 오래됨" in order.error and "120초 전" in order.error
+        assert client.created == [] and "c1" not in broker.processed  # 다음 신호에서 다시 시도할 수 있다
+
+    async def test_missing_price_checks_rest_ticker(self, make_settings) -> None:
+        client = FakeClient(create_results=[self._done()], order_states=[self._done()])
+        client.ticker_error = UpbitNetworkError("down")
+        broker = LiveBroker(client, Portfolio(1_000_000), armed_settings(make_settings), sleep=no_sleep)
+        order = await broker.execute(OrderRequest(M, Side.BUY, amount=10_000, client_id="c2"), None, NOW)
+        assert order.status is OrderStatus.REJECTED and "시세 없음" in order.error and client.created == []
+        client.ticker_error = None  # REST 현재가가 되면 진행
+        order = await broker.execute(OrderRequest(M, Side.BUY, amount=10_000, client_id="c2"), None, NOW)
+        assert order.status is OrderStatus.FILLED
+
+    async def test_fresh_price_passes(self, make_settings) -> None:
+        client = FakeClient(create_results=[self._done()], order_states=[self._done()])
+        broker = LiveBroker(client, Portfolio(1_000_000), armed_settings(make_settings), sleep=no_sleep)
+        fresh = PriceState(M, last_price=100_000_000.0, last_time=NOW - timedelta(seconds=5))
+        order = await broker.execute(OrderRequest(M, Side.BUY, amount=10_000, client_id="c3"), fresh, NOW)
+        assert order.status is OrderStatus.FILLED

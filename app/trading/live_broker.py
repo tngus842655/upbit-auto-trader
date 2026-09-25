@@ -159,6 +159,10 @@ class LiveBroker:
         )
         if client_id in self.processed:
             return self._reject(order, "중복 주문 (같은 신호가 이미 처리됨)")
+        stale = await self._price_guard(request.market, price, now)
+        if stale:
+            log.warning("주문 보류 %s %s: %s", order.market, order.side.value, stale)
+            return self._reject(order, stale)
 
         try:
             params = await self._build_params(request, order)
@@ -214,6 +218,31 @@ class LiveBroker:
             log.error("주문 상태 미확인 %s %s: %s", order.market, order.side.value, order.error)
             return order
         return self._apply_fill(order, final, now)
+
+    async def _price_guard(self, market: str, price: PriceState | None, now: datetime) -> str | None:
+        """시세 신선도 검사 (감사 MEDIUM-6) — 거부 사유를 돌려주고, 통과하면 None.
+
+        PaperBroker 와 같은 기준: ``price_max_age_seconds`` 안의 체결가·호가가 있어야 시장가를 낸다. 시세 인자가 없으면
+        REST 현재가를 한 번 조회해 시장이 살아 있는지 확인한다(실패하면 거부). 시세 스트림과 REST 보정이 모두 죽은
+        상태에서 눈 감고 시장가를 내지 않기 위한 것이다.
+        """
+        max_age = self.settings.price_max_age_seconds
+        if price is not None:
+            if price.is_fresh(now, max_age):
+                return None
+            stamps = [t for t in (price.last_time, price.book_time) if t is not None]
+            detail = f"마지막 시세 {(now - max(stamps)).total_seconds():.0f}초 전" if stamps else "시세 없음"
+            return f"시세 오래됨 — 주문 보류 ({detail}, 허용 {max_age:g}초)"
+        fetch = getattr(self.client, "get_ticker", None)
+        if fetch is None:  # 현재가 조회가 없는 클라이언트(테스트 더블)는 확인할 수단이 없으니 통과
+            return None
+        try:
+            ticker = await fetch(market)
+        except UpbitError as exc:
+            return f"시세 없음 — 현재가 조회 실패로 주문 보류: {exc}"
+        if not getattr(ticker, "trade_price", None):
+            return "시세 없음 — 현재가 응답에 체결가 없음, 주문 보류"
+        return None
 
     # ------------------------------------------------------------------
     async def _build_params(self, request: OrderRequest, order: Order) -> dict[str, Any]:
