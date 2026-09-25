@@ -20,6 +20,31 @@ from app.database.repository import Repository
 log = logging.getLogger(__name__)
 
 HEARTBEAT_STALE_SECONDS = 45.0
+ENGINE_LOG_MAX_BYTES = 10 * 1024 * 1024  # 엔진 stdout 로그 회전 기준 (감사 LOW-2)
+ENGINE_LOG_BACKUPS = 3
+
+
+def rotate_engine_log(path: Path, *, max_bytes: int = ENGINE_LOG_MAX_BYTES, backups: int = ENGINE_LOG_BACKUPS) -> bool:
+    """``path`` 가 ``max_bytes`` 이상이면 ``.1`` ``.2`` … 로 밀어 회전한다(가장 오래된 것은 삭제). 회전했으면 True.
+
+    엔진 stdout 은 자식 프로세스가 직접 쓰므로 실행 중 회전은 못 하고, 대시보드가 엔진을 띄울 때마다 검사한다
+    (감사 LOW-2).
+    """
+    try:
+        if not path.exists() or path.stat().st_size < max_bytes:
+            return False
+        oldest = path.with_name(f"{path.name}.{backups}")
+        if oldest.exists():
+            oldest.unlink()
+        for i in range(backups - 1, 0, -1):
+            src = path.with_name(f"{path.name}.{i}")
+            if src.exists():
+                src.rename(path.with_name(f"{path.name}.{i + 1}"))
+        path.rename(path.with_name(f"{path.name}.1"))
+        return True
+    except OSError as exc:  # 회전 실패는 시작을 막지 않는다
+        log.warning("엔진 로그 회전 실패 %s: %s", path, exc)
+        return False
 
 
 def engine_is_alive(repo: Repository, now: datetime | None = None) -> tuple[bool, str]:
@@ -41,7 +66,9 @@ def start_engine(settings: Settings, mode: str, *, confirm_live: str = "", pytho
     if not log_dir.is_absolute():
         log_dir = PROJECT_ROOT / log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
-    out = open(log_dir / f"engine-{mode}.log", "ab")  # noqa: SIM115 - 자식 프로세스가 쓰는 핸들
+    log_path = log_dir / f"engine-{mode}.log"
+    rotate_engine_log(log_path)
+    out = open(log_path, "ab")  # noqa: SIM115 - 자식 프로세스가 쓰는 핸들
     cmd = [python or sys.executable, "-m", "app.main", "run"]
     if mode == "live":
         cmd += ["--confirm-live", confirm_live]

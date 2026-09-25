@@ -23,3 +23,22 @@ def test_is_engine_process_markers() -> None:
     assert is_engine_process("python -m app.main serve") is False  # 대시보드 서버는 엔진이 아니다
     assert is_engine_process("notepad.exe") is False
     assert is_engine_process("") is False and is_engine_process(None) is False
+
+
+def test_rotate_engine_log_rolls_backups(tmp_path) -> None:
+    """감사 LOW-2 — 기준 크기를 넘은 엔진 로그는 .1/.2/.3 으로 밀리고 가장 오래된 것은 지워진다."""
+    from app.api.process import rotate_engine_log
+
+    path = tmp_path / "engine-paper.log"
+    path.write_bytes(b"x" * 100)
+    assert rotate_engine_log(path, max_bytes=1000, backups=3) is False  # 아직 작다
+    assert path.exists()
+    for round_no in range(1, 5):
+        path.write_bytes(f"round{round_no}".encode() * 50)
+        assert rotate_engine_log(path, max_bytes=10, backups=3) is True
+        assert not path.exists()
+    names = sorted(p.name for p in tmp_path.iterdir())
+    assert names == ["engine-paper.log.1", "engine-paper.log.2", "engine-paper.log.3"]
+    assert (tmp_path / "engine-paper.log.1").read_bytes().startswith(b"round4")
+    assert (tmp_path / "engine-paper.log.3").read_bytes().startswith(b"round2")  # round1 은 밀려나 삭제
+    assert rotate_engine_log(tmp_path / "missing.log") is False
