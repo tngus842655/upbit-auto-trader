@@ -126,3 +126,14 @@ def test_param_builders_validate() -> None:
         UpbitClient.market_sell_params("KRW-BTC", -1)
     assert UpbitClient.market_buy_params("KRW-BTC", 12345.678) == {"market": "KRW-BTC", "side": "bid",
                                                                   "ord_type": "price", "price": "12346"}
+
+
+def test_market_sell_volume_is_rounded_down_to_8_decimals() -> None:
+    """감사 LOW-7 — 매도 수량은 반올림이 아니라 내림: 잔고 0.123456789 를 0.12345679 로 초과 주문하지 않는다."""
+    assert UpbitClient.market_sell_params("KRW-BTC", 0.123456789)["volume"] == "0.12345678"  # 조치 전: 0.12345679
+    assert UpbitClient.market_sell_params("KRW-BTC", 0.0001)["volume"] == "0.00010000"
+    assert UpbitClient.market_sell_params("KRW-BTC", 1.999999999)["volume"] == "1.99999999"
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError, match="최소 단위"):
+        UpbitClient.market_sell_params("KRW-BTC", 0.000000001)

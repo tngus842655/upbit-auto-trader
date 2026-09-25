@@ -25,6 +25,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
+from decimal import ROUND_DOWN, Decimal
 from typing import Any
 from urllib.parse import quote
 
@@ -305,7 +306,12 @@ class UpbitClient:
         """시장가 매도: ``ord_type=market``, ``volume`` 에 수량. price 는 넣지 않는다."""
         if volume <= 0:
             raise ValueError("매도 수량은 0보다 커야 합니다")
-        params: dict[str, Any] = {"market": market, "side": "ask", "ord_type": "market", "volume": f"{volume:.8f}"}
+        # 소수 8자리로 **내림** — .8f 반올림은 잔고(float 변환값)를 1e-8 만큼 초과해 insufficient_funds_ask 가
+        # 날 수 있다 (감사 LOW-7)
+        quantized = Decimal(str(volume)).quantize(Decimal("0.00000001"), rounding=ROUND_DOWN)
+        if quantized <= 0:
+            raise ValueError(f"매도 수량이 최소 단위(1e-8) 미만입니다: {volume}")
+        params: dict[str, Any] = {"market": market, "side": "ask", "ord_type": "market", "volume": f"{quantized:.8f}"}
         if identifier:
             params["identifier"] = identifier
         return params
