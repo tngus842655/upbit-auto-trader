@@ -11,7 +11,7 @@ from app.core.exceptions import LiveTradingDisabledError, UpbitAPIError, UpbitNe
 from app.exchange.models import Account, OrderChance, OrderInfo
 from app.trading.live_broker import LiveBroker, make_identifier, portfolio_from_accounts
 from app.trading.orders import Order, OrderRequest, OrderStatus, OrderType
-from app.trading.portfolio import Portfolio, Side
+from app.trading.portfolio import Portfolio, Position, Side
 
 NOW = datetime(2026, 5, 1, 3, 0, tzinfo=UTC)
 M = "KRW-BTC"
@@ -524,3 +524,64 @@ async def test_reconcile_keeps_reference_price_and_reports_dust(make_settings) -
     diff = await broker.reconcile([M, "KRW-ETH"], prices={M: 90_000_000})
     assert portfolio.position(M).avg_price == 95_000_000 and portfolio.position(M).cost_known is True
     assert "cost_unknown" not in diff
+
+
+async def test_reconcile_counts_locked_balance_and_skips_pending_markets(make_settings) -> None:
+    """감사 MEDIUM-3 — 매도 접수로 locked 로 옮겨간 수량도 포지션이고, 미확정 주문 마켓·현금은 건드리지 않는다."""
+
+    class Client(FakeClient):
+        async def get_accounts(self):
+            return [
+                Account.model_validate({"currency": "KRW", "balance": "400000", "locked": "100000",
+                                        "avg_buy_price": "0", "avg_buy_price_modified": False, "unit_currency": "KRW"}),
+                Account.model_validate({"currency": "BTC", "balance": "0", "locked": "0.01",
+                                        "avg_buy_price": "100000000", "avg_buy_price_modified": False,
+                                        "unit_currency": "KRW"}),
+            ]
+
+    portfolio = Portfolio(1_000_000)
+    portfolio.buy(M, 100_000_000, time=NOW, quantity=0.01, enforce_limits=False)
+    portfolio.buy("KRW-ETH", 5_000_000, time=NOW, quantity=0.1, enforce_limits=False)
+    broker = LiveBroker(Client(), portfolio, armed_settings(make_settings), sleep=no_sleep)
+    # 1) locked 포함: 시장가 매도가 접수돼 BTC 전량이 locked 여도 포지션은 그대로 0.01, KRW 도 balance+locked
+    diff = await broker.reconcile([M, "KRW-ETH"])
+    assert portfolio.position(M).quantity == 0.01 and diff[M]["exchange_qty"] == 0.01
+    assert portfolio.cash == 500_000 and "skipped" not in diff
+    assert "KRW-ETH" not in portfolio.positions  # 거래소에 없는 코인은 정리
+    # 2) 미확정 주문이 있는 마켓은 내부 상태 유지, 현금도 손대지 않음
+    portfolio.positions["KRW-ETH"] = Position("KRW-ETH", 0.1, 5_000_000, NOW, 500_000, 0.0)
+    portfolio.cash = 123_456
+    diff = await broker.reconcile([M, "KRW-ETH"], exclude={"KRW-ETH"})
+    assert portfolio.position("KRW-ETH").quantity == 0.1 and portfolio.cash == 123_456
+    assert diff["skipped"] == ["KRW-ETH"] and diff["cash"] == {"internal": 123_456, "exchange": 500_000}
+    assert portfolio.position(M).quantity == 0.01  # 다른 마켓은 정상 동기화
+
+
+async def test_execute_and_reconcile_do_not_interleave(make_settings) -> None:
+    """감사 MEDIUM-3 — 주문 실행(체결 대기) 중에는 잔고 동기화가 끼어들지 못한다(같은 락)."""
+    import asyncio
+
+    gate = asyncio.Event()
+
+    class SlowClient(FakeClient):
+        async def get_order(self, *, uuid=None, identifier=None):
+            await gate.wait()  # 체결 확인이 늦어지는 동안 reconcile 이 끼어들 틈을 준다
+            return await super().get_order(uuid=uuid, identifier=identifier)
+
+    done = order_info("u1", side="bid", state="done", executed="0.001", fee="50", trades=[trade("100000000", "0.001")])
+    client = SlowClient(create_results=[order_info("u1", side="bid", state="wait")], order_states=[done])
+    portfolio = Portfolio(1_000_000)
+    broker = LiveBroker(client, portfolio, armed_settings(make_settings), sleep=no_sleep)
+    exec_task = asyncio.create_task(
+        broker.execute(OrderRequest(M, Side.BUY, amount=100_000, client_id="c1"), None, NOW)
+    )
+    await asyncio.sleep(0)  # execute 가 락을 잡고 get_order 에서 대기
+    rec_task = asyncio.create_task(broker.reconcile([M]))
+    await asyncio.sleep(0.01)
+    assert not rec_task.done() and portfolio.cash == 1_000_000  # reconcile 은 락 대기 중, 계좌 미변경
+    gate.set()
+    order = await exec_task
+    diff = await rec_task
+    assert order.status is OrderStatus.FILLED
+    assert diff[M]["internal_qty"] == pytest.approx(0.001)  # 동기화는 체결 반영 뒤에 돌았다
+    assert portfolio.cash == 500_000 and portfolio.position(M).quantity == 0.01  # 그 뒤 거래소 기준으로 정렬

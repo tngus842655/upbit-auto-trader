@@ -523,7 +523,9 @@ class TradingEngine:
                      key=f"unresolved:{market}")
         if isinstance(self.broker, LiveBroker):
             try:
-                diff = await self.broker.reconcile(self.markets, prices=self.state.mark_prices())
+                diff = await self.broker.reconcile(
+                    self.markets, prices=self.state.mark_prices(), exclude=set(self.pending_orders),
+                )
                 self.repo.sync_portfolio(self.portfolio)
                 self.repo.log("INFO", "reconcile", "미확정 주문 정리 후 잔고 동기화", diff)
                 self._warn_account_sync(diff)
@@ -909,7 +911,9 @@ class TradingEngine:
         await self.warmup()
         if isinstance(self.broker, LiveBroker):
             await self.ensure_prices()  # 먼지 잔고 판정·기준가에 현재가가 필요하다 (감사 MEDIUM-2)
-            diff = await self.broker.reconcile(self.markets, prices=self.state.mark_prices())
+            diff = await self.broker.reconcile(
+                self.markets, prices=self.state.mark_prices(), exclude=set(self.pending_orders),
+            )
             log.info("거래소 잔고 동기화: %s", diff)
             self.repo.log("INFO", "reconcile", "거래소 잔고와 내부 계좌 동기화", diff)
             self.repo.sync_portfolio(self.portfolio)
@@ -963,7 +967,9 @@ class TradingEngine:
                     if isinstance(self.broker, LiveBroker):
 
                         async def _reconcile() -> None:
-                            diff = await self.broker.reconcile(self.markets, prices=self.state.mark_prices())
+                            diff = await self.broker.reconcile(
+                                self.markets, prices=self.state.mark_prices(), exclude=set(self.pending_orders),
+                            )
                             self.repo.sync_portfolio(self.portfolio)
                             self._warn_account_sync(diff)
 

@@ -27,7 +27,7 @@ import contextlib
 import hashlib
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -61,7 +61,8 @@ def portfolio_from_accounts(
     now: datetime | None = None, reference_prices: Mapping[str, float] | None = None,
     min_order_amount: float = DEFAULT_MIN_ORDER_AMOUNT,
 ) -> Portfolio:
-    """업비트 잔고로 Portfolio 를 만든다. 현금 = KRW 주문 가능 잔고, 포지션 = 거래 대상 마켓의 보유 코인.
+    """업비트 잔고로 Portfolio 를 만든다. 현금 = KRW 잔고(주문에 묶인 locked 포함), 포지션 = 거래 대상 마켓의 보유 코인
+    (역시 locked 포함 — 시장가 매도가 접수돼 수량이 locked 로 옮겨간 순간에도 포지션은 그대로다, 감사 MEDIUM-3).
 
     감사 MEDIUM-2:
     - 평가액(``reference_prices`` 의 현재가, 없으면 평균 매수가 기준)이 최소 주문 금액 미만인 **먼지 잔고**는
@@ -73,16 +74,16 @@ def portfolio_from_accounts(
     """
     now = now or datetime.now(UTC)
     krw = next((a for a in accounts if a.currency == "KRW"), None)
-    cash = float(krw.balance) if krw else 0.0
+    cash = float(krw.total) if krw else 0.0
     portfolio = Portfolio(max(initial_cash or cash, 1e-9), fee_rate=fee_rate, min_order_amount=min_order_amount)
     portfolio.cash = cash
     by_currency = {a.currency: a for a in accounts}
     for market in markets:
         base = market.split("-", 1)[1]
         acc = by_currency.get(base)
-        if acc is None or acc.balance <= 0:
+        if acc is None or acc.total <= 0:
             continue
-        qty = float(acc.balance)
+        qty = float(acc.total)
         avg = float(acc.avg_buy_price)
         reference = float((reference_prices or {}).get(market) or 0.0)
         valuation = reference or avg
@@ -133,11 +134,21 @@ class LiveBroker:
         self.lookup_attempts = max(1, lookup_attempts)
         self.lookup_backoff = lookup_backoff
         self.trades_lookup_attempts = max(0, trades_lookup_attempts)  # 체결 목록이 비어 있을 때 다시 받는 횟수
+        # 주문 실행·미확정 주문 확정·잔고 동기화는 모두 내부 계좌를 바꾼다. 시세 루프의 청산 주문과 메인 루프의 동기화가
+        # 겹치면(주문 체결 대기 중 동기화가 잔고 스냅샷으로 포지션을 지우거나 되살림) 왕복 기록이 빠지므로 직렬화한다
+        # (감사 MEDIUM-3).
+        self._lock = asyncio.Lock()
         self._sleep = sleep
         self.last_chance: dict[str, Any] | None = None
 
     # ------------------------------------------------------------------
     async def execute(self, request: OrderRequest, price: PriceState | None, now: datetime | None = None) -> Order:
+        async with self._lock:
+            return await self._execute_locked(request, price, now)
+
+    async def _execute_locked(
+        self, request: OrderRequest, price: PriceState | None, now: datetime | None = None
+    ) -> Order:
         now = now or datetime.now(UTC)
         assert_live_order_allowed(self.settings)  # 1차 잠금: 설정
         client_id = request.resolved_client_id(self.mode)
@@ -338,6 +349,10 @@ class LiveBroker:
         return order
 
     async def resolve_order(self, order: Order, now: datetime | None = None) -> Order | None:
+        async with self._lock:
+            return await self._resolve_locked(order, now)
+
+    async def _resolve_locked(self, order: Order, now: datetime | None = None) -> Order | None:
         """UNKNOWN 주문의 후속 확정 — uuid(없으면 identifier)로 조회해 최종 상태면 체결을 반영한 Order 를 돌려준다.
 
         - 아직 체결 대기면: fill_timeout 이 지났을 때 취소를 접수하고 None (다음 호출에서 확정).
@@ -382,12 +397,24 @@ class LiveBroker:
         return order
 
     # ------------------------------------------------------------------
-    async def reconcile(self, markets: Sequence[str], prices: Mapping[str, float] | None = None) -> dict[str, Any]:
+    async def reconcile(
+        self, markets: Sequence[str], prices: Mapping[str, float] | None = None,
+        exclude: Collection[str] | None = None,
+    ) -> dict[str, Any]:
         """거래소 잔고와 내부 계좌를 비교해 차이를 보고하고 내부 계좌를 거래소 기준으로 맞춘다.
 
         ``prices``(현재 시세)는 먼지 잔고 판정과 평균 매수가 0 인 코인의 기준가에 쓴다. 이미 기준가를 정한 포지션은
         그 기준가를 유지한다(동기화 때마다 시세로 바뀌지 않게). 결과 diff 에 ``dust``·``cost_unknown`` 을 넣는다.
+        ``exclude`` 는 미확정(UNKNOWN) 주문이 남아 있는 마켓 — 체결이 내부에 반영되기 전이라 거래소 스냅샷으로 덮으면
+        나중에 확정될 체결이 이중 반영되거나(포지션 없음 → REJECTED) 왕복 기록이 빠진다. 그 마켓의 포지션과 현금은
+        손대지 않고 diff 의 ``skipped`` 로만 알린다 (감사 MEDIUM-3). 주문 실행과 같은 락 안에서 돈다.
         """
+        async with self._lock:
+            return await self._reconcile_locked(markets, prices, set(exclude or ()))
+
+    async def _reconcile_locked(
+        self, markets: Sequence[str], prices: Mapping[str, float] | None, exclude: set[str]
+    ) -> dict[str, Any]:
         accounts = await self.client.get_accounts()
         references: dict[str, float] = dict(prices or {})
         for market, mine in self.portfolio.positions.items():
@@ -410,12 +437,18 @@ class LiveBroker:
         unknown = [m for m, p in exchange.positions.items() if not p.cost_known]
         if unknown:
             diff["cost_unknown"] = unknown
-        self.portfolio.cash = exchange.cash
-        self.portfolio.dust = dict(exchange.dust)
+        if exclude:
+            diff["skipped"] = sorted(exclude)
+            log.info("잔고 동기화: 미확정 주문 마켓 %s 와 현금은 건너뜀", sorted(exclude))
+        else:
+            self.portfolio.cash = exchange.cash
+        self.portfolio.dust = {m: q for m, q in exchange.dust.items() if m not in exclude}
         for market in list(self.portfolio.positions):
-            if market not in exchange.positions:
+            if market not in exchange.positions and market not in exclude:
                 del self.portfolio.positions[market]
         for market, pos in exchange.positions.items():
+            if market in exclude:
+                continue
             mine = self.portfolio.position(market)
             if mine is None:
                 self.portfolio.positions[market] = pos
