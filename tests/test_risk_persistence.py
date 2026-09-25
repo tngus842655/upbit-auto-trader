@@ -116,3 +116,20 @@ def test_store_failure_does_not_break_risk_manager() -> None:
     assert rm.state.day_start_equity == 1_000_000 and rm.state.halted is False
     with pytest.raises(RuntimeError):
         Broken().load()
+
+
+def test_cash_flow_state_survives_restart_same_day() -> None:
+    """감사 MEDIUM-4 — 당일 입출금·커서는 재시작 뒤에도 남고, 날짜가 바뀌면 커서는 미초기화(None)로 돌아간다."""
+    t = datetime(2026, 5, 1, 3, 0, tzinfo=UTC)
+    store = MemoryRiskStateStore()
+    rm = RiskManager(RiskConfig(daily_loss_limit_pct=0.03), store=store)
+    rm.update_equity(1_000_000, t)
+    rm.apply_cash_flow(-100_000, 7, t)
+    again = RiskManager(RiskConfig(daily_loss_limit_pct=0.03), store=store)
+    again.rebuild([], t + timedelta(hours=1), 895_000)
+    assert again.state.day_cash_flow == -100_000 and again.state.cash_flow_cursor == 7
+    assert again.daily_base_equity == 900_000
+    assert again.update_equity(870_000, t + timedelta(hours=2)) is not None
+    fresh = RiskManager(RiskConfig(daily_loss_limit_pct=0.03), store=store)
+    fresh.rebuild([], t + timedelta(days=1), 870_000)
+    assert fresh.state.day_cash_flow == 0.0 and fresh.state.cash_flow_cursor is None

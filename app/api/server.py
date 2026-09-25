@@ -412,6 +412,13 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
             raise HTTPException(status_code=502, detail=describe_api_error(exc)) from exc
         summary = f"{payload.get('direction')} {amount} {payload.get('currency', 'KRW')}"
         service.repo("paper").log("INFO", "pocket_transfer", summary, result)
+        direction = str(payload.get("direction") or "")
+        if str(payload.get("currency") or "KRW").upper() == "KRW":
+            # 봇 포켓 기준 입출금으로 기록 → LIVE 누적 수익률·일일 손실 계산에서 자산 변동을 뺀다 (감사 MEDIUM-4)
+            signed = amount if direction == "to_bot" else -amount
+            live_repo = service.repo("live")
+            flow_id = live_repo.save_cash_flow(signed, note=f"대시보드 포켓 이전 ({summary})")
+            live_repo.log("INFO", "cash_flow", f"입출금 기록 #{flow_id}: {signed:+,.0f} KRW", {"id": flow_id, **result})
         return result
 
     # ------------------------------------------------------------------ 실시간

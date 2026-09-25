@@ -55,6 +55,8 @@ class RiskState:
     halt_reason: str | None = None
     peak_prices: dict[str, float] = field(default_factory=dict)  # 추적 손절용 보유 중 최고가
     last_exit_at: dict[str, datetime] = field(default_factory=dict)
+    day_cash_flow: float = 0.0  # 당일 입출금 합(KRW, 입금 +) — 일일 손실 기준 자산에 더한다 (감사 MEDIUM-4)
+    cash_flow_cursor: int | None = None  # 반영한 마지막 cash_flows.id (None = 미초기화, 엔진이 최신 id 로 맞춘다)
 
     def to_persist_dict(self) -> dict[str, Any]:
         """저장소용 — 재시작 뒤 복구할 값 전부 (JSON 직렬화 가능)."""
@@ -75,6 +77,8 @@ class RiskState:
             "lock_kind": self.lock_kind,
             "halted": self.halted,
             "halt_reason": self.halt_reason,
+            "day_cash_flow": self.day_cash_flow,
+            "cash_flow_cursor": self.cash_flow_cursor,
         }
 
 
@@ -112,6 +116,7 @@ class RiskManager:
         self.state.day = today
         self.state.day_start_equity = equity
         self.state.daily_realized_pnl = 0.0
+        self.state.day_cash_flow = 0.0
         self.state.consecutive_losses = 0
         self.state.lock_reason = None
         self.state.lock_kind = None
@@ -125,18 +130,46 @@ class RiskManager:
             self.state.day_start_equity = equity
         self.state.last_equity = equity
         limit = self.config.daily_loss_limit_pct
-        if limit is not None and self.state.day_start_equity and self.state.lock_reason is None:
-            drawdown = 1 - equity / self.state.day_start_equity
+        base = self.daily_base_equity
+        if limit is not None and base and self.state.lock_reason is None:
+            drawdown = 1 - equity / base
             if drawdown >= limit:
+                flow_note = ""
+                if self.state.day_cash_flow:
+                    flow_note = f" (입출금 {self.state.day_cash_flow:+,.0f} 반영 기준 {base:,.0f})"
                 self.state.lock_reason = (
-                    f"일일 손실 한도 초과: 당일 시작 {self.state.day_start_equity:,.0f} → 현재 {equity:,.0f} "
-                    f"({drawdown * 100:.2f}% ≥ {limit * 100:g}%)"
+                    f"일일 손실 한도 초과: 당일 시작 {self.state.day_start_equity:,.0f}{flow_note}"
+                    f" → 현재 {equity:,.0f} ({drawdown * 100:.2f}% ≥ {limit * 100:g}%)"
                 )
                 self.state.lock_kind = "daily"
                 log.warning("리스크 잠금: %s", self.state.lock_reason)
                 self._persist()
                 return self.state.lock_reason
         return None
+
+    @property
+    def daily_base_equity(self) -> float | None:
+        """일일 손실 판정의 기준 자산 = 당일 시작 자산 + 당일 입출금 (포켓 이전은 손익이 아니다, 감사 MEDIUM-4)."""
+        if self.state.day_start_equity is None:
+            return None
+        return self.state.day_start_equity + self.state.day_cash_flow
+
+    def apply_cash_flow(self, amount: float, flow_id: int | None, now: datetime) -> float | None:
+        """입출금(포켓 이전)을 반영한다: 당일 기준 자산을 그만큼 옮기고 커서를 전진시킨다. 새 기준 자산을 돌려준다."""
+        self.start_day_if_needed(now, self.state.last_equity)
+        self.state.day_cash_flow += amount
+        if flow_id is not None:
+            self.state.cash_flow_cursor = max(self.state.cash_flow_cursor or 0, flow_id)
+        base = self.daily_base_equity
+        log.info("입출금 반영 %+.0f KRW → 일일 손실 기준 자산 %s", amount,
+                 f"{base:,.0f}" if base is not None else "미정")
+        self._persist()
+        return base
+
+    def set_cash_flow_cursor(self, flow_id: int) -> None:
+        """커서만 맞춘다 (시작 전 기록은 이미 현재 자산에 들어 있으므로 반영하지 않고 건너뛴다)."""
+        self.state.cash_flow_cursor = flow_id
+        self._persist()
 
     def record_trade(self, trade: Trade, now: datetime | None = None) -> str | None:
         """왕복 거래 결과를 반영한다. 연속 손실 한도를 넘으면 잠그고 사유를 돌려준다."""
@@ -186,6 +219,9 @@ class RiskManager:
                     self.state.last_exit_at[market] = datetime.fromisoformat(stamp)
                 except (TypeError, ValueError):
                     continue
+        if same_day:
+            self.state.day_cash_flow = float(saved.get("day_cash_flow") or 0.0)
+            self.state.cash_flow_cursor = saved.get("cash_flow_cursor")
         if saved.get("halted"):
             self.state.halted = True
             self.state.halt_reason = saved.get("halt_reason")

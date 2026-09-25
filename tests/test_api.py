@@ -266,7 +266,7 @@ def test_local_mode_rejects_cross_site_and_remote(api, monkeypatch) -> None:
 
 
 def test_pockets_endpoints(api, monkeypatch) -> None:
-    client, repo, _, _ = api
+    client, repo, _, db = api
 
     async def fake_pockets(self):
         main_pocket = {"uuid": "m", "name": "메인포켓", "type": "main", "is_main": True, "balances": []}
@@ -285,6 +285,23 @@ def test_pockets_endpoints(api, monkeypatch) -> None:
     assert r.status_code == 200 and r.json()["state"] == "done"
     assert client.post("/api/pockets/transfer", json={"direction": "sideways", "amount": 1}).status_code == 400
     assert any(e.event == "pocket_transfer" for e in repo.recent_logs(5))
+    # 이전 금액은 LIVE 입출금으로 기록된다 (감사 MEDIUM-4): 메인→봇 +, 봇→메인 −, 실패(400)는 기록 없음
+    assert client.post("/api/pockets/transfer", json={"direction": "to_main", "amount": 2500}).status_code == 200
+    flows = Repository(db, "live").load_cash_flows()
+    assert [f.amount for f in flows] == [10000, -2500] and flows[0].note.startswith("대시보드 포켓 이전")
+    assert Repository(db, "paper").load_cash_flows() == []
+
+
+def test_performance_excludes_cash_flows(api) -> None:
+    """감사 MEDIUM-4 — 누적 수익률은 (자산 / (초기 자산 + 순입출금)) − 1."""
+    client, repo, _, _ = api
+    seed(repo)
+    before = client.get("/api/performance?mode=paper").json()
+    repo.save_cash_flow(100_000, "입금")
+    perf = client.get("/api/performance?mode=paper").json()
+    assert perf["net_cash_flow"] == 100_000 and perf["equity"] == before["equity"]
+    assert perf["cumulative_return"] == pytest.approx(perf["equity"] / (perf["initial_cash"] + 100_000) - 1)
+    assert perf["cumulative_return"] < before["cumulative_return"]
 
 
 def test_markets_catalog(api) -> None:

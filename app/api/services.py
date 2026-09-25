@@ -180,13 +180,17 @@ class DashboardService:
         if equity_now is not None:
             points.append((now, equity_now))
         initial = bal["initial_cash"]
-        cumulative = (equity_now / initial - 1) if equity_now is not None and initial else None
+        # 포켓 이전(입출금)은 손익이 아니다: 기준 자산에 순입출금을 더해 비교한다 (감사 MEDIUM-4)
+        net_flow = repo.net_cash_flow()
+        adjusted_initial = (initial + net_flow) if initial is not None else None
+        cumulative = (equity_now / adjusted_initial - 1) if equity_now is not None and adjusted_initial else None
 
         day_start_kst = now.astimezone(KST).replace(hour=0, minute=0, second=0, microsecond=0)
         before_today = [e for t, e in points if t < day_start_kst]
         today_points = [e for t, e in points if t >= day_start_kst]
         day_base = before_today[-1] if before_today else (today_points[0] if today_points else None)
-        today_return = (equity_now / day_base - 1) if equity_now is not None and day_base else None
+        today_flow = repo.net_cash_flow(since=day_start_kst)
+        today_return = ((equity_now - today_flow) / day_base - 1) if equity_now is not None and day_base else None
 
         mdd = 0.0
         peak_t = trough_t = None
@@ -202,6 +206,7 @@ class DashboardService:
         step = max(1, len(points) // 500)
         return {
             "initial_cash": initial, "equity": equity_now, "cumulative_return": cumulative,
+            "net_cash_flow": net_flow, "today_cash_flow": today_flow,
             "today_return": today_return, "today_realized_pnl": sum(t.pnl for t in today_trades),
             "realized_pnl": sum(t.pnl for t in trades), "mdd": mdd,
             "mdd_peak_time": _iso(peak_t) if peak_t else None, "mdd_trough_time": _iso(trough_t) if trough_t else None,

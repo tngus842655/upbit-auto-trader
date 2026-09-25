@@ -187,3 +187,21 @@ class TestExits:
         assert rm.check_exits(pos, low=960.0, high=990.0, now=NOW) is None
         hit = rm.check_exits(pos, low=940.0, high=990.0, now=NOW)
         assert hit is not None and hit.reason == EXIT_STOP_LOSS and hit.trigger_price == pytest.approx(950.0)
+
+
+def test_cash_flow_moves_daily_loss_base() -> None:
+    """감사 MEDIUM-4 — 포켓 이전(입출금)은 손실·이익이 아니다: 일일 손실 기준 자산을 같이 옮긴다."""
+    rm = unrestricted(daily_loss_limit_pct=0.03)
+    assert rm.update_equity(1_000_000, NOW) is None
+    assert rm.apply_cash_flow(-100_000, 1, NOW) == 900_000  # 봇 → 메인 10만원 (조치 전엔 즉시 "일일 손실 10%" 잠금)
+    assert rm.state.day_cash_flow == -100_000 and rm.state.cash_flow_cursor == 1
+    assert rm.update_equity(895_000, NOW + timedelta(minutes=1)) is None  # 실제 손실 0.6%
+    lock = rm.update_equity(870_000, NOW + timedelta(minutes=2))  # 3.3%
+    assert lock is not None and "입출금 -100,000" in lock
+    rm2 = unrestricted(daily_loss_limit_pct=0.03)
+    rm2.update_equity(1_000_000, NOW)
+    rm2.apply_cash_flow(200_000, 5, NOW)  # 메인 → 봇 20만원 (조치 전엔 수익 20% 로 보임)
+    assert rm2.update_equity(1_170_000, NOW + timedelta(minutes=1)) is None  # 기준 120만 대비 -2.5%
+    assert rm2.update_equity(1_160_000, NOW + timedelta(minutes=2)) is not None  # -3.3%
+    rm2.update_equity(1_160_000, NOW + timedelta(days=1))  # 날짜가 바뀌면 당일 입출금은 0, 커서는 유지
+    assert rm2.state.day_cash_flow == 0.0 and rm2.state.cash_flow_cursor == 5

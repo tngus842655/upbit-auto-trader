@@ -220,6 +220,20 @@ class EngineStatus(Base):
     restart_required: Mapped[bool] = mapped_column(default=False)
 
 
+class CashFlowRecord(Base):
+    """봇 포켓의 입출금(포켓 이전) 기록 — 누적 수익률·일일 손실 계산에서 자산 변동을 빼기 위한 것 (감사 MEDIUM-4)."""
+
+    __tablename__ = "cash_flows"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    mode: Mapped[str] = mapped_column(String(10), index=True)
+    time: Mapped[datetime] = mapped_column(DateTime, default=utcnow_naive, index=True)
+    amount: Mapped[float] = mapped_column(Float)  # KRW, 입금(메인→봇) +, 출금(봇→메인) −
+    currency: Mapped[str] = mapped_column(String(10), default="KRW")
+    note: Mapped[str] = mapped_column(Text, default="")
+    source: Mapped[str] = mapped_column(String(20), default="dashboard")
+
+
 class BotCommand(Base):
     """외부(CLI·대시보드)에서 엔진으로 보내는 명령 큐. 엔진이 폴링해 처리하고 결과를 남긴다."""
 

@@ -109,6 +109,17 @@ def test_cost_known_flag_round_trips(repo: Repository) -> None:
     assert restored.position("KRW-SOL").avg_price == 150_000.0
 
 
+def test_cash_flows_save_load_and_net(repo: Repository) -> None:
+    """감사 MEDIUM-4 — 입출금 기록: 커서 기반 조회, 기간 합계, 모드별 분리."""
+    a = repo.save_cash_flow(100_000, "입금", time=T0)
+    b = repo.save_cash_flow(-30_000, "출금", time=T0 + timedelta(days=1))
+    assert repo.max_cash_flow_id() == b and b > a
+    assert [f.amount for f in repo.load_cash_flows()] == [100_000, -30_000]
+    assert [f.id for f in repo.load_cash_flows(after_id=a)] == [b]
+    assert repo.net_cash_flow() == 70_000 and repo.net_cash_flow(since=T0 + timedelta(hours=1)) == -30_000
+    assert Repository(repo.db, "live").load_cash_flows() == [] and Repository(repo.db, "live").max_cash_flow_id() == 0
+
+
 def test_restore_without_account_returns_fresh(repo: Repository) -> None:
     portfolio, restored = repo.restore_portfolio(initial_cash=123_456, fee_rate=0.001, min_order_amount=5000)
     assert restored is False and portfolio.cash == 123_456 and portfolio.positions == {}

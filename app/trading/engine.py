@@ -221,6 +221,31 @@ class TradingEngine:
         log.info("리스크 상태 복구: 오늘 거래 %d건, 연속손실 %d, 실현손익 %.0f", len(trades),
                  self.risk.state.consecutive_losses, self.risk.state.daily_realized_pnl)
 
+    async def apply_cash_flows(self, now: datetime | None = None) -> int:
+        """대시보드가 기록한 입출금(포켓 이전)을 일일 손실 기준 자산에 반영한다 (감사 MEDIUM-4). 반영 건수를 돌려준다.
+
+        커서가 없으면(첫 실행·날짜 바뀜) 지금까지의 기록은 이미 현재 자산에 들어 있으니 건너뛰고 커서만 맞춘다.
+        """
+        if not isinstance(self.risk, RiskManager):
+            return 0
+        now = now or self.clock()
+        cursor = self.risk.state.cash_flow_cursor
+        if cursor is None:
+            self.risk.set_cash_flow_cursor(self.repo.max_cash_flow_id())
+            return 0
+        applied = 0
+        for flow in self.repo.load_cash_flows(after_id=cursor):
+            base = self.risk.apply_cash_flow(flow.amount, flow.id, now)
+            applied += 1
+            message = (
+                f"{flow.amount:+,.0f} {flow.currency} ({flow.note or flow.source}) → 일일 손실 기준 자산 "
+                + (f"{base:,.0f}" if base is not None else "미정")
+            )
+            log.info("입출금 반영: %s", message)
+            self._log_safely("INFO", "cash_flow_applied", message,
+                             {"id": flow.id, "amount": flow.amount, "day_cash_flow": self.risk.state.day_cash_flow})
+        return applied
+
     async def _fetch_candles(self, market: str, count: int) -> list:
         remaining = count
         collected: list = []
@@ -923,6 +948,7 @@ class TradingEngine:
         await self.ensure_prices()
         equity = self.snapshot()
         self.rebuild_risk_state(self.clock(), equity)
+        await self.apply_cash_flows(self.clock())
         price_task = asyncio.create_task(self._price_loop(), name="price-loop")
         self.status = "running"
         self.write_heartbeat("RUNNING")
@@ -944,6 +970,7 @@ class TradingEngine:
                     break
                 now = self.clock()
                 await self._guarded("명령 처리", self.poll_commands)
+                await self._guarded("입출금 반영", lambda now=now: self.apply_cash_flows(now))
                 if self._stop.is_set():
                     break
                 if self._reload_requested:

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pandas as pd
-from sqlalchemy import delete, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.exc import IntegrityError
 
 from app.database.database import Database
@@ -20,6 +20,7 @@ from app.database.models import (
     BotLog,
     BotSettingsRecord,
     CandleRecord,
+    CashFlowRecord,
     EngineStatus,
     FillRecord,
     OrderRecord,
@@ -341,6 +342,35 @@ class Repository:
             if record is not None:
                 record.processed_at = datetime.now(UTC).replace(tzinfo=None)
                 record.result = result
+
+    # ------------------------------------------------------------------
+    # 입출금 (cash_flows) — 포켓 이전 등 자산 변동 (감사 MEDIUM-4)
+    # ------------------------------------------------------------------
+    def save_cash_flow(self, amount: float, note: str = "", *, currency: str = "KRW", source: str = "dashboard",
+                       time: datetime | None = None) -> int:
+        """입출금 1건 기록 (입금 +, 출금 −). 기록 id 를 돌려준다."""
+        with self.db.session() as s:
+            record = CashFlowRecord(mode=self.mode, amount=float(amount), note=note, currency=currency, source=source,
+                                    time=to_db_time(time or datetime.now(UTC)))
+            s.add(record)
+            s.flush()
+            return int(record.id)
+
+    def load_cash_flows(self, after_id: int = 0, since: datetime | None = None) -> list[CashFlowRecord]:
+        with self.db.session() as s:
+            stmt = select(CashFlowRecord).where(CashFlowRecord.mode == self.mode, CashFlowRecord.id > after_id)
+            if since is not None:
+                stmt = stmt.where(CashFlowRecord.time >= to_db_time(since))
+            return list(s.execute(stmt.order_by(CashFlowRecord.id)).scalars())
+
+    def net_cash_flow(self, since: datetime | None = None, currency: str = "KRW") -> float:
+        """기간 입출금 합계 (KRW). 누적 수익률의 기준 자산 조정에 쓴다."""
+        return float(sum(f.amount for f in self.load_cash_flows(since=since) if f.currency == currency))
+
+    def max_cash_flow_id(self) -> int:
+        with self.db.session() as s:
+            value = s.execute(select(func.max(CashFlowRecord.id)).where(CashFlowRecord.mode == self.mode)).scalar()
+            return int(value or 0)
 
     # ------------------------------------------------------------------
     # 실행 설정 (bot_settings)
