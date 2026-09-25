@@ -130,7 +130,7 @@
       channelLabels(list) { return (list || []).map((c) => this.channelLabel(c)).join(", ") || "없음"; },
       eventLabel(v) {
         const m = { bot_start: "봇 시작", bot_stop: "봇 종료", command: "명령", stale_commands: "대기 명령 무시", dashboard_start: "대시보드 시작 요청",
-          dashboard_kill: "강제 종료", pocket_transfer: "포켓 이전", notify_test: "알림 테스트", notify_failed: "알림 실패", order_filled: "체결",
+          dashboard_kill: "강제 종료", pocket_transfer: "포켓 이전", notify_test: "알림 테스트", notify_failed: "알림 실패", account_sync: "잔고 확인 필요", order_filled: "체결",
           order_rejected: "주문 거부", duplicate_order_blocked: "중복 주문 차단", risk_rejected: "리스크 거부", risk_lock: "리스크 잠금",
           paused_skip: "일시정지 중 건너뜀", candle_fetch_failed: "캔들 조회 실패", price_stream_failed: "시세 스트림 끊김", api_error: "API 오류",
           settings_applied: "설정 반영", settings_invalid: "설정 검증 실패", reconcile: "잔고 동기화", signal: "신호", exit: "청산" };

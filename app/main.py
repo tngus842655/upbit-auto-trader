@@ -307,9 +307,15 @@ async def build_live_components(settings: Settings, client: UpbitClient, markets
     repo = Repository(db, mode="live")
     accounts = await client.get_accounts()
     account_record = repo.load_account()
+    reference_prices: dict[str, float] = {}
+    try:  # avg_buy_price=0 인 코인의 기준가·먼지 잔고 판정용 현재가 (실패해도 시작은 한다 — 첫 시세에서 보정)
+        reference_prices = {t.market: float(t.trade_price) for t in await client.get_tickers(markets)}
+    except TraderError as exc:
+        log.warning("현재가 조회 실패 (기준가 없이 시작): %s", exc)
     portfolio = portfolio_from_accounts(
         accounts, markets, fee_rate=settings.paper_fee_rate,
         initial_cash=account_record.initial_cash if account_record else None,
+        reference_prices=reference_prices, min_order_amount=DEFAULT_MIN_ORDER_AMOUNT,
     )
     broker = LiveBroker(client, portfolio, settings, processed_client_ids=repo.processed_client_ids())
     risk = RiskManager(settings.risk_config())

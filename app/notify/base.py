@@ -34,6 +34,7 @@ class EventKind(StrEnum):
     BOT_START = "bot_start"  # 봇 시작·재시작(복구)
     BOT_STOP = "bot_stop"  # 봇 중지 (정상·비정상)
     SETTINGS = "settings"  # 실행 설정 반영·검증 실패
+    ACCOUNT = "account"  # 거래소 잔고 동기화 경고 (평균 매수가 없는 코인·먼지 잔고)
 
 
 ALL_KINDS: tuple[EventKind, ...] = tuple(EventKind)

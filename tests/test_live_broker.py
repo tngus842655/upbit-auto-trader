@@ -150,7 +150,32 @@ def test_portfolio_from_accounts() -> None:
     p = portfolio_from_accounts(accounts, [M, "KRW-ETH"], fee_rate=0.0005)
     assert p.cash == pytest.approx(123456.78)
     assert p.position(M).quantity == 0.005 and p.position(M).avg_price == 90_000_000
+    assert p.position(M).cost_known is True and p.dust == {}
     assert "KRW-XRP" not in p.positions  # 거래 대상이 아닌 코인은 무시
+
+
+def _account(currency: str, balance: str, avg: str) -> Account:
+    return Account.model_validate({"currency": currency, "balance": balance, "locked": "0", "avg_buy_price": avg,
+                                   "avg_buy_price_modified": avg == "0", "unit_currency": "KRW"})
+
+
+def test_portfolio_from_accounts_excludes_dust_and_marks_unknown_cost() -> None:
+    """감사 MEDIUM-2 — 먼지 잔고는 포지션이 아니고, 평균 매수가 0 인 코인은 현재가를 기준가로 삼는다."""
+    accounts = [_account("KRW", "100000", "0"), _account("BTC", "0.00000001", "100000000"), _account("ETH", "0.5", "0"),
+                _account("XRP", "10", "600"), _account("SOL", "2", "0")]
+    markets = [M, "KRW-ETH", "KRW-XRP", "KRW-SOL"]
+    p = portfolio_from_accounts(accounts, markets, fee_rate=0.0005,
+                                reference_prices={M: 100_000_000, "KRW-ETH": 5_000_000, "KRW-XRP": 400})
+    assert p.dust == {M: 1e-8, "KRW-XRP": 10.0}  # 1원짜리 먼지, 현재가 기준 4,000원(평균가 기준이면 6,000원) < 5,000원
+    assert M not in p.positions and "KRW-XRP" not in p.positions and p.min_order_amount == 5000
+    eth = p.position("KRW-ETH")
+    assert eth is not None and eth.cost_known is False and eth.avg_price == 5_000_000
+    assert eth.entry_amount == pytest.approx(2_500_000) and eth.cost_basis == pytest.approx(2_500_000)
+    sol = p.position("KRW-SOL")  # 현재가도 없으면 기준가 0 으로 두고 RiskManager 가 첫 시세로 채운다
+    assert sol is not None and sol.cost_known is False and sol.avg_price == 0.0
+    # 현재가 없이(평균 매수가 기준)도 먼지는 걸러진다
+    p2 = portfolio_from_accounts(accounts, [M, "KRW-XRP"], fee_rate=0.0005)
+    assert not p2.has_position(M) and p2.position("KRW-XRP").quantity == 10.0  # XRP 는 평균가 기준 6,000원이라 포지션
 
 
 class TestGuards:
@@ -470,3 +495,32 @@ async def test_reconcile_aligns_internal_portfolio_to_exchange(make_settings) ->
     diff = await broker.reconcile([M, "KRW-ETH"])
     assert diff["cash"]["exchange"] == 500_000 and diff[M]["exchange_qty"] == 0.01
     assert portfolio.cash == 500_000 and portfolio.position(M).quantity == 0.01
+    assert "dust" not in diff and "cost_unknown" not in diff and portfolio.position(M).cost_known is True
+
+
+async def test_reconcile_keeps_reference_price_and_reports_dust(make_settings) -> None:
+    """감사 MEDIUM-2 — 기준가(현재 시세)로 잡은 포지션은 다음 동기화에서 바뀌지 않고, 먼지 잔고는 diff 에 보고된다."""
+
+    class Client(FakeClient):
+        btc_avg = "0"
+
+        async def get_accounts(self):
+            return [_account("KRW", "500000", "0"), _account("BTC", "0.01", self.btc_avg),
+                    _account("ETH", "0.0001", "5000000")]
+
+    client = Client()
+    portfolio = Portfolio(1_000_000)
+    broker = LiveBroker(client, portfolio, armed_settings(make_settings), sleep=no_sleep)
+    diff = await broker.reconcile([M, "KRW-ETH"], prices={M: 100_000_000, "KRW-ETH": 5_000_000})
+    pos = portfolio.position(M)
+    assert pos.cost_known is False and pos.avg_price == 100_000_000 and diff["cost_unknown"] == [M]
+    assert "KRW-ETH" not in portfolio.positions and diff["dust"] == {"KRW-ETH": 0.0001}  # 500원짜리 먼지
+    assert portfolio.dust == {"KRW-ETH": 0.0001}
+    # 시세가 바뀌어도 이미 정한 기준가는 유지된다
+    await broker.reconcile([M, "KRW-ETH"], prices={M: 90_000_000, "KRW-ETH": 5_000_000})
+    assert portfolio.position(M).avg_price == 100_000_000 and portfolio.position(M).cost_known is False
+    # 거래소가 평균 매수가를 알려주면(수동 설정·추가 매수) 그 값으로 바뀐다
+    client.btc_avg = "95000000"
+    diff = await broker.reconcile([M, "KRW-ETH"], prices={M: 90_000_000})
+    assert portfolio.position(M).avg_price == 95_000_000 and portfolio.position(M).cost_known is True
+    assert "cost_unknown" not in diff

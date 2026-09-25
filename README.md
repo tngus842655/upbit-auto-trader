@@ -166,6 +166,7 @@ copy .env.example .env      # Windows
 | `api_error` | 캔들 조회 실패, 시세 스트림 끊김 — 같은 원인은 `NOTIFY_ERROR_COOLDOWN_SECONDS` 동안 한 번만 |
 | `bot_start` / `bot_stop` | 시작(복구한 포지션 수 포함 = 재시작) / 종료(정상·Ctrl+C·비정상, 체결·오류 건수·실현손익) |
 | `settings` | 대시보드에서 저장한 실행 설정이 엔진에 반영되거나 검증에 실패했을 때 |
+| `account` | LIVE 잔고 동기화에서 평균 매수가가 없는 코인(포켓 이전 등 → 봇이 처음 본 시세를 기준가로 사용, 대시보드에 "기준가" 표시)이나 최소 주문 금액 미만의 먼지 잔고(포지션에서 제외, 거래소가 매도를 거부하는 수량)를 발견했을 때 |
 
 - Telegram: [@BotFather](https://t.me/BotFather) 에서 `/newbot` 으로 봇을 만들어 토큰을 `TELEGRAM_BOT_TOKEN` 에 넣는다. 채널로 받으려면 채널 관리자에 봇을 추가(메시지 게시 권한)하고 메시지를 하나 올린 뒤 `notify-test --discover-telegram` 을 실행하면 채널 ID(`-100…`)가 나온다. 그 값을 `TELEGRAM_CHAT_ID` 에 넣는다(개인 대화면 봇에게 /start 를 보낸 뒤 같은 명령). Discord: 채널 설정 > 연동 > 웹훅 URL 을 `DISCORD_WEBHOOK_URL` 에.
 - `NOTIFY_EVENTS=all`(기본) / `off` / `buy,sell,stop_loss` 처럼 골라 받는다. 설정 후 `notify-test` 로 발송을 확인하거나 대시보드 제어 탭의 "테스트 발송" 을 누른다.

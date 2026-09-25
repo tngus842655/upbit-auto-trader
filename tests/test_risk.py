@@ -10,7 +10,7 @@ from app.risk import RiskConfig, RiskManager
 from app.risk.manager import EXIT_STOP_LOSS, EXIT_TAKE_PROFIT, EXIT_TRAILING_STOP
 from app.strategy.base import Action, Signal
 from app.trading.market_state import PriceState
-from app.trading.portfolio import Portfolio, Trade
+from app.trading.portfolio import Portfolio, Position, Trade
 
 M = "KRW-BTC"
 NOW = datetime(2026, 5, 1, 3, 0, tzinfo=UTC)  # KST 12:00
@@ -177,3 +177,13 @@ class TestExits:
         rm = unrestricted()
         pos = self.position().position(M)
         assert rm.check_exits(pos, low=1.0, high=1000.0, now=NOW) is None
+
+    def test_unknown_cost_adopts_first_price_as_reference(self) -> None:
+        """감사 MEDIUM-2 — 평균 매수가 0 인 포지션은 처음 본 시세를 기준가로 삼아 손절이 살아난다."""
+        rm = unrestricted(stop_loss_pct=0.05)
+        pos = Position(M, 0.01, 0.0, NOW, 0.0, 0.0, cost_known=False)
+        assert rm.check_exits(pos, low=1000.0, high=1000.0, now=NOW) is None  # 기준가를 정한 틱: 판정 없음
+        assert pos.avg_price == 1000.0 and pos.entry_amount == pytest.approx(10.0) and pos.cost_known is False
+        assert rm.check_exits(pos, low=960.0, high=990.0, now=NOW) is None
+        hit = rm.check_exits(pos, low=940.0, high=990.0, now=NOW)
+        assert hit is not None and hit.reason == EXIT_STOP_LOSS and hit.trigger_price == pytest.approx(950.0)

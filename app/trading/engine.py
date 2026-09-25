@@ -523,12 +523,28 @@ class TradingEngine:
                      key=f"unresolved:{market}")
         if isinstance(self.broker, LiveBroker):
             try:
-                diff = await self.broker.reconcile(self.markets)
+                diff = await self.broker.reconcile(self.markets, prices=self.state.mark_prices())
                 self.repo.sync_portfolio(self.portfolio)
                 self.repo.log("INFO", "reconcile", "미확정 주문 정리 후 잔고 동기화", diff)
+                self._warn_account_sync(diff)
             except Exception as exc:  # noqa: BLE001
                 self.stats.errors += 1
                 log.error("잔고 동기화 실패: %s", exc)
+
+    def _warn_account_sync(self, diff: dict[str, Any]) -> None:
+        """잔고 동기화에서 평균 매수가 없는 코인·먼지 잔고가 보이면 기록·알림한다 (감사 MEDIUM-2). 같은 내용은 쿨다운"""
+        unknown = diff.get("cost_unknown") or []
+        dust = diff.get("dust") or {}
+        if not unknown and not dust:
+            return
+        parts = []
+        if unknown:
+            parts.append("평균 매수가 없음 → 현재 시세를 기준가로 사용: " + ", ".join(unknown))
+        if dust:
+            parts.append("최소 주문 금액 미만이라 포지션 제외: " + ", ".join(f"{m} {q:.8f}" for m, q in dust.items()))
+        message = " · ".join(parts)
+        self._log_safely("WARNING", "account_sync", message, {"cost_unknown": unknown, "dust": dust})
+        self._notify(EventKind.ACCOUNT, "거래소 잔고 확인 필요", message, key="account_sync")
 
     # ------------------------------------------------------------------
     # 리스크: 청산 감시
@@ -892,10 +908,12 @@ class TradingEngine:
         self.write_heartbeat("STARTING")
         await self.warmup()
         if isinstance(self.broker, LiveBroker):
-            diff = await self.broker.reconcile(self.markets)
+            await self.ensure_prices()  # 먼지 잔고 판정·기준가에 현재가가 필요하다 (감사 MEDIUM-2)
+            diff = await self.broker.reconcile(self.markets, prices=self.state.mark_prices())
             log.info("거래소 잔고 동기화: %s", diff)
             self.repo.log("INFO", "reconcile", "거래소 잔고와 내부 계좌 동기화", diff)
             self.repo.sync_portfolio(self.portfolio)
+            self._warn_account_sync(diff)
         self.load_pending_orders()
         await self.resolve_pending_orders(self.clock())
         await self.ensure_prices()
@@ -945,8 +963,9 @@ class TradingEngine:
                     if isinstance(self.broker, LiveBroker):
 
                         async def _reconcile() -> None:
-                            await self.broker.reconcile(self.markets)
+                            diff = await self.broker.reconcile(self.markets, prices=self.state.mark_prices())
                             self.repo.sync_portfolio(self.portfolio)
+                            self._warn_account_sync(diff)
 
                         await self._guarded("잔고 동기화", _reconcile)
                     await self._guarded("스냅샷", lambda now=now: self.snapshot(now))

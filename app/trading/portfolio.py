@@ -65,6 +65,9 @@ class Position:
     opened_at: datetime
     entry_amount: float  # 누적 매수 금액
     entry_fee: float  # 누적 매수 수수료
+    # False: avg_price 가 진짜 매수 단가가 아니라 봇이 처음 본 시세(기준가)다 — 포켓 이전·입금 등으로 들어와
+    # 거래소 avg_buy_price 가 0 인 코인 (감사 MEDIUM-2). 손절·익절·손익은 이 기준가 기준으로 계산된다.
+    cost_known: bool = True
 
     @property
     def cost_basis(self) -> float:
@@ -126,6 +129,9 @@ class Portfolio:
     fills: list[Fill] = field(default_factory=list)
     trades: list[Trade] = field(default_factory=list)
     fees_paid: float = 0.0
+    # 최소 주문 금액 미만이라 포지션에서 제외한 거래소 잔고 (마켓 → 수량). 거래소가 매도를 거부하는 수량이라
+    # 매매 대상이 아니다.
+    dust: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.initial_cash <= 0:
@@ -256,7 +262,8 @@ class Portfolio:
             "cash": self.cash,
             "fees_paid": self.fees_paid,
             "open_positions": {
-                m: {"quantity": p.quantity, "avg_price": p.avg_price, "cost_basis": p.cost_basis}
+                m: {"quantity": p.quantity, "avg_price": p.avg_price, "cost_basis": p.cost_basis,
+                    "cost_known": p.cost_known}
                 for m, p in self.positions.items()
             },
             "closed_trades": len(self.trades),

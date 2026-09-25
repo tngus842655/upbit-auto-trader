@@ -113,6 +113,7 @@ class Repository:
                     PositionRecord(
                         mode=self.mode, market=market, quantity=pos.quantity, avg_price=pos.avg_price,
                         entry_amount=pos.entry_amount, entry_fee=pos.entry_fee, opened_at=to_db_time(pos.opened_at),
+                        cost_known=pos.cost_known,
                     )
                 )
 
@@ -190,7 +191,7 @@ class Repository:
             portfolio.positions[rec.market] = Position(
                 market=rec.market, quantity=rec.quantity, avg_price=rec.avg_price,
                 opened_at=from_db_time(rec.opened_at) or datetime.now(UTC), entry_amount=rec.entry_amount,
-                entry_fee=rec.entry_fee,
+                entry_fee=rec.entry_fee, cost_known=rec.cost_known is not False,
             )
         return portfolio, True
 

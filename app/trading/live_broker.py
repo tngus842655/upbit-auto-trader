@@ -27,7 +27,7 @@ import contextlib
 import hashlib
 import logging
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -39,7 +39,7 @@ from app.exchange.upbit_client import UpbitClient
 from app.trading.live_guard import assert_live_order_allowed
 from app.trading.market_state import PriceState
 from app.trading.orders import Order, OrderRequest, OrderStatus, OrderType
-from app.trading.portfolio import Portfolio, PortfolioError, Position, Side
+from app.trading.portfolio import DEFAULT_MIN_ORDER_AMOUNT, Portfolio, PortfolioError, Position, Side
 
 log = logging.getLogger(__name__)
 
@@ -58,13 +58,23 @@ def make_identifier(client_id: str, attempt: int = 1) -> str:
 
 def portfolio_from_accounts(
     accounts: Sequence[Account], markets: Sequence[str], *, fee_rate: float, initial_cash: float | None = None,
-    now: datetime | None = None,
+    now: datetime | None = None, reference_prices: Mapping[str, float] | None = None,
+    min_order_amount: float = DEFAULT_MIN_ORDER_AMOUNT,
 ) -> Portfolio:
-    """업비트 잔고로 Portfolio 를 만든다. 현금 = KRW 주문 가능 잔고, 포지션 = 거래 대상 마켓의 보유 코인."""
+    """업비트 잔고로 Portfolio 를 만든다. 현금 = KRW 주문 가능 잔고, 포지션 = 거래 대상 마켓의 보유 코인.
+
+    감사 MEDIUM-2:
+    - 평가액(``reference_prices`` 의 현재가, 없으면 평균 매수가 기준)이 최소 주문 금액 미만인 **먼지 잔고**는
+      포지션에 넣지 않고 ``portfolio.dust`` 에 둔다 — 거래소가 매도를 거부(under_min_total_ask)하는 수량이 마켓을
+      점유하고 손절 매도를 1초마다 되풀이하지 않게.
+    - ``avg_buy_price`` 가 0 인 코인(포켓 이전·입금 등, 매수 단가를 모름)은 현재가를 기준가로 삼고
+      ``cost_known=False`` 로 표시한다. 현재가도 없으면 기준가 0 으로 두되, ``RiskManager.check_exits`` 가 처음 본
+      시세를 기준가로 채운다.
+    """
     now = now or datetime.now(UTC)
     krw = next((a for a in accounts if a.currency == "KRW"), None)
     cash = float(krw.balance) if krw else 0.0
-    portfolio = Portfolio(max(initial_cash or cash, 1e-9), fee_rate=fee_rate)
+    portfolio = Portfolio(max(initial_cash or cash, 1e-9), fee_rate=fee_rate, min_order_amount=min_order_amount)
     portfolio.cash = cash
     by_currency = {a.currency: a for a in accounts}
     for market in markets:
@@ -74,8 +84,21 @@ def portfolio_from_accounts(
             continue
         qty = float(acc.balance)
         avg = float(acc.avg_buy_price)
+        reference = float((reference_prices or {}).get(market) or 0.0)
+        valuation = reference or avg
+        if valuation > 0 and qty * valuation < min_order_amount:
+            portfolio.dust[market] = qty
+            log.warning("%s 잔고 %.8f (평가 %.0f원) 은 최소 주문 금액 %.0f원 미만 → 포지션에서 제외", market, qty,
+                        qty * valuation, min_order_amount)
+            continue
+        cost_known = avg > 0
+        price = avg if cost_known else reference
+        if not cost_known:
+            log.warning("%s 평균 매수가 0 (포켓 이전 등) → 기준가 %s, 손절·익절·손익은 기준가 기준", market,
+                        f"{price:,.0f}원" if price else "미정 (첫 시세로 채움)")
         portfolio.positions[market] = Position(
-            market=market, quantity=qty, avg_price=avg, opened_at=now, entry_amount=qty * avg, entry_fee=0.0,
+            market=market, quantity=qty, avg_price=price, opened_at=now, entry_amount=qty * price, entry_fee=0.0,
+            cost_known=cost_known,
         )
     return portfolio
 
@@ -359,10 +382,21 @@ class LiveBroker:
         return order
 
     # ------------------------------------------------------------------
-    async def reconcile(self, markets: Sequence[str]) -> dict[str, Any]:
-        """거래소 잔고와 내부 계좌를 비교해 차이를 보고하고 내부 계좌를 거래소 기준으로 맞춘다."""
+    async def reconcile(self, markets: Sequence[str], prices: Mapping[str, float] | None = None) -> dict[str, Any]:
+        """거래소 잔고와 내부 계좌를 비교해 차이를 보고하고 내부 계좌를 거래소 기준으로 맞춘다.
+
+        ``prices``(현재 시세)는 먼지 잔고 판정과 평균 매수가 0 인 코인의 기준가에 쓴다. 이미 기준가를 정한 포지션은
+        그 기준가를 유지한다(동기화 때마다 시세로 바뀌지 않게). 결과 diff 에 ``dust``·``cost_unknown`` 을 넣는다.
+        """
         accounts = await self.client.get_accounts()
-        exchange = portfolio_from_accounts(accounts, markets, fee_rate=self.portfolio.fee_rate)
+        references: dict[str, float] = dict(prices or {})
+        for market, mine in self.portfolio.positions.items():
+            if not mine.cost_known and mine.avg_price > 0:
+                references[market] = mine.avg_price
+        exchange = portfolio_from_accounts(
+            accounts, markets, fee_rate=self.portfolio.fee_rate, reference_prices=references,
+            min_order_amount=self.portfolio.min_order_amount,
+        )
         diff: dict[str, Any] = {"cash": {"internal": self.portfolio.cash, "exchange": exchange.cash}}
         for market in set(self.portfolio.positions) | set(exchange.positions):
             mine = self.portfolio.position(market)
@@ -371,7 +405,13 @@ class LiveBroker:
                 "internal_qty": mine.quantity if mine else 0.0,
                 "exchange_qty": theirs.quantity if theirs else 0.0,
             }
+        if exchange.dust:
+            diff["dust"] = dict(exchange.dust)
+        unknown = [m for m, p in exchange.positions.items() if not p.cost_known]
+        if unknown:
+            diff["cost_unknown"] = unknown
         self.portfolio.cash = exchange.cash
+        self.portfolio.dust = dict(exchange.dust)
         for market in list(self.portfolio.positions):
             if market not in exchange.positions:
                 del self.portfolio.positions[market]
@@ -382,6 +422,7 @@ class LiveBroker:
             else:
                 mine.quantity = pos.quantity
                 mine.avg_price = pos.avg_price
+                mine.cost_known = pos.cost_known
                 mine.entry_amount = pos.quantity * pos.avg_price
         return diff
 

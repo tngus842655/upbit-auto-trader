@@ -19,7 +19,7 @@ from app.database.models import (
 )
 from app.strategy.base import Action, Signal
 from app.trading.orders import Order, OrderStatus, OrderType
-from app.trading.portfolio import Portfolio, Side
+from app.trading.portfolio import Portfolio, Position, Side
 from tests.test_strategy import make_frame
 
 T0 = datetime(2026, 5, 1, 9, 0, tzinfo=UTC)
@@ -81,6 +81,7 @@ def test_order_fill_round_trip_and_portfolio_sync(repo: Repository) -> None:
     assert restored.fees_paid == pytest.approx(portfolio.fees_paid)
     pos = restored.position("KRW-BTC")
     assert pos is not None and pos.quantity == pytest.approx(fill.quantity) and pos.opened_at == T0
+    assert pos.cost_known is True
 
     # 청산 후 동기화 → 포지션 삭제, 왕복 거래 저장
     portfolio.sell("KRW-BTC", 55_000_000, time=T0 + timedelta(hours=2), reason="signal")
@@ -96,6 +97,16 @@ def test_order_fill_round_trip_and_portfolio_sync(repo: Repository) -> None:
     order.error = "테스트"
     repo.save_order(order)
     assert repo.count_rows(OrderRecord) == 1 and repo.recent_orders(1)[0].status == "REJECTED"
+
+
+def test_cost_known_flag_round_trips(repo: Repository) -> None:
+    """감사 MEDIUM-2 — 기준가로 잡은 포지션(cost_known=False)은 재시작 복구 뒤에도 그대로다."""
+    portfolio = Portfolio(1_000_000)
+    portfolio.positions["KRW-SOL"] = Position("KRW-SOL", 2.0, 150_000.0, T0, 300_000.0, 0.0, cost_known=False)
+    repo.sync_portfolio(portfolio)
+    restored, ok = repo.restore_portfolio(initial_cash=1, fee_rate=0.0005, min_order_amount=5000)
+    assert ok and restored.position("KRW-SOL").cost_known is False
+    assert restored.position("KRW-SOL").avg_price == 150_000.0
 
 
 def test_restore_without_account_returns_fresh(repo: Repository) -> None:

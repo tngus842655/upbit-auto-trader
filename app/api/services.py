@@ -156,7 +156,7 @@ class DashboardService:
                 "market": p.market, "quantity": p.quantity, "avg_price": p.avg_price, "current_price": price,
                 "value": value, "unrealized_pnl": (value - cost) if value is not None else None,
                 "unrealized_pnl_pct": ((value - cost) / cost) if value is not None and cost else None,
-                "opened_at": _iso(p.opened_at),
+                "opened_at": _iso(p.opened_at), "cost_known": p.cost_known is not False,
             })
             positions_value += value or 0.0
         cash = account.cash if account else None

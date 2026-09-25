@@ -288,6 +288,15 @@ class RiskManager:
         """손절 → 익절 → 추적 손절 순서. 같은 구간에서 둘 다 닿으면 손절을 먼저 본다(보수적)."""
         cfg = self.config
         market = position.market
+        if position.avg_price <= 0:
+            # 기준가가 없는 포지션(거래소 avg_buy_price=0 을 시세 없이 복구): 처음 본 시세를 기준가로 삼는다
+            # (감사 MEDIUM-2).
+            # 기준가 0 이면 손절가도 0 이라 손절이 영원히 걸리지 않기 때문. 기준을 정한 이번 틱은 판정하지 않는다.
+            position.avg_price = high
+            position.entry_amount = position.quantity * high
+            position.cost_known = False
+            log.warning("%s 기준가 없음 → 현재 시세 %.0f 를 기준가로 사용 (손절·익절은 이 값 기준)", market, high)
+            return None
         if cfg.stop_loss_pct is not None:
             stop = position.avg_price * (1 - cfg.stop_loss_pct)
             if low <= stop:
