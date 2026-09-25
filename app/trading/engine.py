@@ -441,17 +441,13 @@ class TradingEngine:
             log.warning("중복 주문 차단 %s %s (%s)", order.market, order.side.value, order.client_id)
             self.repo.log("WARNING", "duplicate_order_blocked", f"{order.market} {order.side.value}", order.to_dict())
             return
-        self.repo.save_order(order)
         if order.is_filled:
             self.stats.orders_filled += 1
             self.last_trade_at = order.filled_at or self.clock()
-            for fill in order.fills:
-                self.repo.save_fill(fill, order_id=order.id, strategy=order.strategy)
             new_trades = self.portfolio.trades[self._round_trips_saved :]
-            for trade in new_trades:
-                self.repo.save_round_trip(trade)
+            # 주문·체결·왕복 거래·계좌·포지션을 한 트랜잭션으로 저장한다 (감사 MEDIUM-7)
+            self.repo.record_fill(order, trades=new_trades, portfolio=self.portfolio)
             self._round_trips_saved = len(self.portfolio.trades)
-            self.repo.sync_portfolio(self.portfolio)
             if order.side is Side.SELL and isinstance(self.risk, RiskManager):
                 for trade in self.portfolio.trades[-1:]:
                     lock = self.risk.record_trade(trade, order.filled_at or self.clock())
@@ -472,6 +468,7 @@ class TradingEngine:
             self.snapshot(order.filled_at)
         elif order.status is OrderStatus.UNKNOWN:
             # 거래소에 주문이 있을 수 있는데 확인이 안 된 상태. 계좌는 건드리지 않고 기록·알림만 남긴다.
+            self.repo.save_order(order)
             self.stats.orders_unknown += 1
             self.pending_orders[order.market] = order
             log.error("주문 상태 미확인 %s %s: %s", order.market, order.side.value, order.error)
@@ -481,6 +478,7 @@ class TradingEngine:
             self._notify(EventKind.ORDER_REJECTED, f"{order.market} {side_label} 상태 미확인 (운영자 확인 필요)",
                          str(order.error or ""), {"order": order.to_dict()})
         else:
+            self.repo.save_order(order)
             self.stats.orders_rejected += 1
             log.warning("주문 거부 %s %s: %s", order.market, order.side.value, order.error)
             self.repo.log("WARNING", "order_rejected", f"{order.market} {order.side.value}: {order.error}",

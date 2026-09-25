@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -60,63 +60,82 @@ class Repository:
         except IntegrityError:
             return False
 
-    def save_order(self, order: Order) -> None:
-        with self.db.session() as s:
-            s.merge(
-                OrderRecord(
-                    id=order.id, client_id=order.client_id, mode=order.mode, market=order.market,
-                    side=order.side.value, order_type=order.order_type.value, amount=order.amount,
-                    quantity=order.quantity, status=order.status.value, fill_price=order.fill_price,
-                    filled_quantity=order.filled_quantity, fee=order.fee, reason=order.reason,
-                    strategy=order.strategy, signal_time=to_db_time(order.signal_time),
-                    created_at=to_db_time(order.created_at), filled_at=to_db_time(order.filled_at),
-                    error=order.error, exchange_order_id=order.exchange_order_id,
-                    exchange_identifier=order.exchange_identifier,
+    @staticmethod
+    def _order_record(order: Order) -> OrderRecord:
+        return OrderRecord(
+            id=order.id, client_id=order.client_id, mode=order.mode, market=order.market,
+            side=order.side.value, order_type=order.order_type.value, amount=order.amount,
+            quantity=order.quantity, status=order.status.value, fill_price=order.fill_price,
+            filled_quantity=order.filled_quantity, fee=order.fee, reason=order.reason,
+            strategy=order.strategy, signal_time=to_db_time(order.signal_time),
+            created_at=to_db_time(order.created_at), filled_at=to_db_time(order.filled_at),
+            error=order.error, exchange_order_id=order.exchange_order_id,
+            exchange_identifier=order.exchange_identifier,
+        )
+
+    def _fill_record(self, fill: Fill, *, order_id: str, strategy: str = "") -> FillRecord:
+        return FillRecord(
+            time=to_db_time(fill.time), mode=self.mode, market=fill.market, side=fill.side.value,
+            price=fill.price, quantity=fill.quantity, amount=fill.amount, fee=fill.fee,
+            order_id=order_id, strategy=strategy, reason=fill.reason, status="filled",
+        )
+
+    def _round_trip_record(self, trade: Trade) -> RoundTripRecord:
+        return RoundTripRecord(
+            mode=self.mode, market=trade.market, entry_time=to_db_time(trade.entry_time),
+            entry_price=trade.entry_price, quantity=trade.quantity, entry_amount=trade.entry_amount,
+            entry_fee=trade.entry_fee, exit_time=to_db_time(trade.exit_time), exit_price=trade.exit_price,
+            exit_amount=trade.exit_amount, exit_fee=trade.exit_fee, exit_reason=trade.exit_reason,
+            pnl=trade.pnl, pnl_pct=trade.pnl_pct,
+        )
+
+    def _sync_portfolio_in(self, s: Any, portfolio: Portfolio) -> None:
+        s.merge(
+            AccountRecord(
+                mode=self.mode, initial_cash=portfolio.initial_cash, cash=portfolio.cash,
+                fees_paid=portfolio.fees_paid,
+            )
+        )
+        s.execute(delete(PositionRecord).where(PositionRecord.mode == self.mode))
+        for market, pos in portfolio.positions.items():
+            s.add(
+                PositionRecord(
+                    mode=self.mode, market=market, quantity=pos.quantity, avg_price=pos.avg_price,
+                    entry_amount=pos.entry_amount, entry_fee=pos.entry_fee, opened_at=to_db_time(pos.opened_at),
+                    cost_known=pos.cost_known,
                 )
             )
+
+    def save_order(self, order: Order) -> None:
+        with self.db.session() as s:
+            s.merge(self._order_record(order))
 
     def save_fill(self, fill: Fill, *, order_id: str, strategy: str = "") -> None:
         with self.db.session() as s:
-            s.add(
-                FillRecord(
-                    time=to_db_time(fill.time), mode=self.mode, market=fill.market, side=fill.side.value,
-                    price=fill.price, quantity=fill.quantity, amount=fill.amount, fee=fill.fee,
-                    order_id=order_id, strategy=strategy, reason=fill.reason, status="filled",
-                )
-            )
+            s.add(self._fill_record(fill, order_id=order_id, strategy=strategy))
 
     def save_round_trip(self, trade: Trade) -> None:
         with self.db.session() as s:
-            s.add(
-                RoundTripRecord(
-                    mode=self.mode, market=trade.market, entry_time=to_db_time(trade.entry_time),
-                    entry_price=trade.entry_price, quantity=trade.quantity, entry_amount=trade.entry_amount,
-                    entry_fee=trade.entry_fee, exit_time=to_db_time(trade.exit_time), exit_price=trade.exit_price,
-                    exit_amount=trade.exit_amount, exit_fee=trade.exit_fee, exit_reason=trade.exit_reason,
-                    pnl=trade.pnl, pnl_pct=trade.pnl_pct,
-                )
-            )
+            s.add(self._round_trip_record(trade))
 
     def sync_portfolio(self, portfolio: Portfolio) -> None:
         """계좌 현금과 현재 포지션을 DB 와 맞춘다 (닫힌 포지션은 삭제)."""
         with self.db.session() as s:
-            s.merge(
-                AccountRecord(
-                    mode=self.mode, initial_cash=portfolio.initial_cash, cash=portfolio.cash,
-                    fees_paid=portfolio.fees_paid,
-                )
-            )
-            open_markets = set(portfolio.positions)
-            s.execute(delete(PositionRecord).where(PositionRecord.mode == self.mode))
-            for market in open_markets:
-                pos = portfolio.positions[market]
-                s.add(
-                    PositionRecord(
-                        mode=self.mode, market=market, quantity=pos.quantity, avg_price=pos.avg_price,
-                        entry_amount=pos.entry_amount, entry_fee=pos.entry_fee, opened_at=to_db_time(pos.opened_at),
-                        cost_known=pos.cost_known,
-                    )
-                )
+            self._sync_portfolio_in(s, portfolio)
+
+    def record_fill(self, order: Order, *, trades: Sequence[Trade], portfolio: Portfolio) -> None:
+        """체결 1건의 기록 전부(주문·체결·왕복 거래·계좌·포지션)를 **한 트랜잭션**으로 저장한다 (감사 MEDIUM-7).
+
+        중간에 프로세스가 죽거나 DB 오류가 나면 아무것도 남지 않는다 — 재시작 시 "주문은 FILLED 인데 계좌·포지션은
+        이전 값" 인 반쯤 기록된 상태가 생기지 않는다.
+        """
+        with self.db.session() as s:
+            s.merge(self._order_record(order))
+            for fill in order.fills:
+                s.add(self._fill_record(fill, order_id=order.id, strategy=order.strategy))
+            for trade in trades:
+                s.add(self._round_trip_record(trade))
+            self._sync_portfolio_in(s, portfolio)
 
     def snapshot_balance(
         self, portfolio: Portfolio, prices: Mapping[str, float], time: datetime | None = None

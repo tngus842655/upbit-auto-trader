@@ -280,7 +280,7 @@ class FlakyRepo:
         self.failures = 0
 
     def __getattr__(self, name):
-        if name == "save_order":
+        if name in ("save_order", "record_fill"):
             def boom(*_a, **_k):
                 self.failures += 1
                 raise OperationalError("INSERT INTO orders", {}, Exception("database is locked"))

@@ -120,6 +120,28 @@ def test_cash_flows_save_load_and_net(repo: Repository) -> None:
     assert Repository(repo.db, "live").load_cash_flows() == [] and Repository(repo.db, "live").max_cash_flow_id() == 0
 
 
+def test_record_fill_is_atomic(repo: Repository) -> None:
+    """감사 MEDIUM-7 — 주문·체결·왕복·계좌·포지션이 한 트랜잭션: 중간에 실패하면 아무것도 남지 않는다."""
+    portfolio = Portfolio(1_000_000, fee_rate=0.0005)
+    fill = portfolio.buy("KRW-BTC", 50_000_000, time=T0, amount=100_000, reason="signal")
+    order = Order(
+        id="o-atomic", client_id="paper:KRW-BTC:BUY:a", mode="paper", market="KRW-BTC", side=Side.BUY,
+        order_type=OrderType.MARKET, amount=100_000, quantity=None, status=OrderStatus.FILLED, created_at=T0,
+        reason="signal", strategy="ma_cross", signal_time=T0, filled_at=T0, fill_price=fill.price,
+        filled_quantity=fill.quantity, fee=fill.fee, fills=[fill],
+    )
+    with pytest.raises(AttributeError):  # 왕복 거래 기록에서 터짐 → 주문·체결·계좌까지 전부 롤백
+        repo.record_fill(order, trades=[object()], portfolio=portfolio)  # type: ignore[list-item]
+    assert repo.count_rows(OrderRecord) == 0 and repo.count_rows(FillRecord) == 0
+    assert repo.load_account() is None and repo.load_positions() == []
+    repo.record_fill(order, trades=[], portfolio=portfolio)
+    assert repo.count_rows(OrderRecord) == 1 and repo.count_rows(FillRecord) == 1
+    assert repo.load_account().cash == pytest.approx(portfolio.cash)
+    assert [p.market for p in repo.load_positions()] == ["KRW-BTC"]
+    restored, ok = repo.restore_portfolio(initial_cash=1, fee_rate=0.0005, min_order_amount=5000)
+    assert ok and restored.position("KRW-BTC").quantity == pytest.approx(fill.quantity)
+
+
 def test_restore_without_account_returns_fresh(repo: Repository) -> None:
     portfolio, restored = repo.restore_portfolio(initial_cash=123_456, fee_rate=0.001, min_order_amount=5000)
     assert restored is False and portfolio.cash == 123_456 and portfolio.positions == {}
