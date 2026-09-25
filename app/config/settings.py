@@ -106,6 +106,18 @@ def mask_secret(value: str | None, visible: int = 4) -> str:
     return value[:visible] + "*" * (len(value) - visible)
 
 
+def mask_url_password(url: str) -> str:
+    """DB URL 의 비밀번호를 가린다 (감사 LOW-3): ``postgresql://user:secret@host/db`` → ``postgresql://user:***@host/db``."""
+    scheme, sep, rest = url.partition("://")
+    if not sep or "@" not in rest:
+        return url
+    creds, _, tail = rest.rpartition("@")
+    if ":" not in creds:
+        return url
+    user, _, _password = creds.partition(":")
+    return f"{scheme}://{user}:***@{tail}"
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=str(DEFAULT_ENV_FILE),
@@ -336,14 +348,14 @@ class Settings(BaseSettings):
         return warnings
 
     def summary(self) -> dict[str, Any]:
-        """비밀값을 마스킹한 설정 요약 (로그·상태 API용)."""
-        access = self.upbit_access_key.get_secret_value() if self.upbit_access_key else None
+        """비밀값을 드러내지 않는 설정 요약 (로그·상태 API용): 키는 설정 여부만, DB URL 은 비밀번호를 가린다 (LOW-3)."""
         return {
             "trading_mode": self.trading_mode.value,
             "live_trading_enabled": self.live_trading_enabled,
             "live_trading_allowed": self.is_live_trading_allowed,
             "has_api_keys": self.has_api_keys,
-            "upbit_access_key": mask_secret(access),
+            "upbit_access_key": "설정됨" if self.upbit_access_key else "없음",
+            "upbit_pocket_keys": "설정됨" if self.has_pocket_keys else "없음",
             "notify_channels": self.notify_channels,
             "notify_events": [k.value for k in self.notify_event_kinds()],
             "upbit_api_url": self.upbit_api_url,
@@ -352,7 +364,7 @@ class Settings(BaseSettings):
             "strategy_name": self.strategy_name,
             "strategy_params": dict(self.strategy_params),
             "candle_interval": self.candle_interval,
-            "database_url": self.database_url,
+            "database_url": mask_url_password(self.database_url),
             "log_level": self.log_level,
             "log_dir": str(self.log_dir),
             "http_timeout_seconds": self.http_timeout_seconds,

@@ -85,11 +85,24 @@ class TestApiKeys:
         assert make_settings(upbit_access_key="abcd1234", upbit_secret_key="xyz").has_api_keys is True
 
     def test_summary_masks_key(self, make_settings) -> None:
-        s = make_settings(upbit_access_key="abcdefgh12345678", upbit_secret_key="secret-value")
+        """감사 LOW-3 — 요약에는 키의 어떤 부분도, DB URL 의 비밀번호도 나오지 않는다."""
+        s = make_settings(upbit_access_key="abcdefgh12345678", upbit_secret_key="secret-value",
+                          database_url="postgresql://bot:pa%40ss@db.local:5432/trader")
         summary = s.summary()
-        assert summary["upbit_access_key"] == "abcd************"
-        assert "secret" not in str(summary)
+        assert summary["upbit_access_key"] == "설정됨" and "abcd" not in str(summary)
+        assert summary["upbit_pocket_keys"] == "없음"
+        assert summary["database_url"] == "postgresql://bot:***@db.local:5432/trader"
+        assert "secret" not in str(summary) and "pa%40ss" not in str(summary)
         assert "secret-value" not in repr(s)
+        assert make_settings().summary()["upbit_access_key"] == "없음"
+
+    def test_mask_url_password(self) -> None:
+        from app.config.settings import mask_url_password
+
+        assert mask_url_password("sqlite:///data/trader.db") == "sqlite:///data/trader.db"
+        assert mask_url_password("postgresql://u:p@h/db") == "postgresql://u:***@h/db"
+        assert mask_url_password("postgresql://u@h/db") == "postgresql://u@h/db"
+        assert mask_url_password("mysql://u:p:q@h:3306/db") == "mysql://u:***@h:3306/db"
 
     def test_mask_secret(self) -> None:
         assert mask_secret(None) == "(없음)"
