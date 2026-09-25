@@ -179,3 +179,23 @@ def test_file_database_creates_parent_dir(tmp_path) -> None:
     assert (tmp_path / "nested" / "trader.db").exists()
     assert db.ping() is True
     db.dispose()
+
+
+def test_save_runtime_settings_retries_on_version_race(repo: Repository, monkeypatch) -> None:
+    """감사 LOW-6 — 동시 저장으로 같은 버전 번호를 잡아 유니크 위반이 나면 번호를 다시 읽어 재시도한다."""
+    assert repo.save_runtime_settings({"a": 1}, "v1") == 1
+    assert repo.save_runtime_settings({"a": 2}, "v2") == 2
+    real = repo.runtime_settings_version
+    calls = {"n": 0}
+
+    def stale_then_real() -> int:
+        calls["n"] += 1
+        return 1 if calls["n"] == 1 else real()  # 첫 번째 읽기는 다른 프로세스가 끼어든 뒤의 낡은 값(→ v2 충돌)
+
+    monkeypatch.setattr(repo, "runtime_settings_version", stale_then_real)
+    assert repo.save_runtime_settings({"a": 3}, "v3") == 3  # 조치 전: IntegrityError 로 500
+    assert calls["n"] == 2 and repo.load_runtime_settings() == ({"a": 3}, 3)
+
+    monkeypatch.setattr(repo, "runtime_settings_version", lambda: 1)  # 계속 낡은 값 → 한도 뒤 포기
+    with pytest.raises(RuntimeError, match="계속 겹칩니다"):
+        repo.save_runtime_settings({"a": 4}, "v4", attempts=2)

@@ -400,11 +400,20 @@ class Repository:
             latest = s.execute(stmt.order_by(BotSettingsRecord.version.desc()).limit(1)).scalar_one_or_none()
             return int(latest or 0)
 
-    def save_runtime_settings(self, data: dict[str, Any], note: str = "") -> int:
-        version = self.runtime_settings_version() + 1
-        with self.db.session() as s:
-            s.add(BotSettingsRecord(mode=self.mode, version=version, data=data, note=note))
-        return version
+    def save_runtime_settings(self, data: dict[str, Any], note: str = "", *, attempts: int = 5) -> int:
+        """새 버전으로 저장한다. 버전 번호는 max(version)+1 이라 동시 저장이 겹치면 유니크 위반이 나는데,
+        그때는 번호를 다시 읽어 재시도한다 (감사 LOW-6)."""
+        last_error: IntegrityError | None = None
+        for _ in range(max(1, attempts)):
+            version = self.runtime_settings_version() + 1
+            try:
+                with self.db.session() as s:
+                    s.add(BotSettingsRecord(mode=self.mode, version=version, data=data, note=note))
+                return version
+            except IntegrityError as exc:
+                last_error = exc
+                log.warning("실행 설정 v%d 저장 경합 → 다시 시도", version)
+        raise RuntimeError(f"실행 설정 저장이 계속 겹칩니다 ({attempts}회): {last_error}")
 
     def load_runtime_settings(self) -> tuple[dict[str, Any], int] | None:
         with self.db.session() as s:
