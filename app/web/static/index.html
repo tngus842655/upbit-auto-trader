@@ -194,8 +194,13 @@
   <main v-show="tab === 'settings'" class="page">
     <section class="grid two">
       <div class="card">
-        <h3>실행 설정 <span class="muted small">DB v{{ settingsVersion }} · 저장하면 새 버전이 되고 엔진이 다음 캔들 경계에 반영합니다</span></h3>
+        <h3>실행 설정 <span class="pill" :class="'mode-' + mode">{{ modeLabel }}</span> <span class="muted small">DB v{{ settingsVersion }} · 저장하면 새 버전이 되고 엔진이 다음 캔들 경계에 반영합니다</span></h3>
         <div class="form" v-if="form">
+          <div v-if="mode === 'live'" class="note" :class="{ warnnote: !settingsVersion }">
+            <template v-if="!settingsVersion"><b>실거래 설정이 아직 저장되지 않았습니다.</b> 지금 보이는 값은 .env 초기값이고, 이대로 엔진을 시작하면 이 값이 실거래 v1 로 저장되어 쓰입니다.<br></template>
+            실거래 설정은 모의매매와 따로 저장됩니다. 모의매매에서 검증한 설정을 쓰려면 가져와서 확인한 뒤 저장하세요.
+            <div class="actions"><button class="small" @click="importPaperSettings" title="모의매매 최신 설정을 폼에 채웁니다 — 저장을 눌러야 실거래에 적용됩니다">모의매매 설정 가져오기</button></div>
+          </div>
           <div class="field"><span>거래 대상 마켓 <i class="help" tabindex="0" :data-tip="help('markets')">?</i> <em>재시작 필요</em></span>
             <div class="row">
               <input :value="form.marketsText" readonly placeholder="코인 검색 버튼으로 선택하세요" title="직접 입력할 수 없습니다. 코인 검색 버튼으로 고르고 칩의 × 로 뺍니다" style="flex:1" @click="openMarketPicker">
@@ -234,6 +239,7 @@
           </div>
           <label class="field"><span>변경 메모</span><input v-model="form.note" placeholder="예: 손절 3%로 축소"></label>
           <div v-if="loadedVersion" class="note">v{{ loadedVersion }} 설정을 불러왔습니다. 내용을 확인한 뒤 <b>저장</b>을 누르면 새 버전으로 적용됩니다.</div>
+          <div v-if="importedPaperVersion" class="note warnnote">모의매매 v{{ importedPaperVersion }} 설정을 폼에 채웠습니다 — <b>아직 실거래에 적용되지 않았습니다.</b> 거래당 최대 투자금·현금 사용 비율처럼 금액이 걸린 항목은 모의 계좌 기준이니 실거래 잔고에 맞게 고친 뒤 <b>저장</b>하세요.</div>
           <div class="actions">
             <button class="primary" @click="saveSettings" :disabled="saving">{{ saving ? '저장 중…' : '저장 (다음 거래부터 적용)' }}</button>
             <button @click="loadSettings">되돌리기</button>
@@ -251,6 +257,7 @@
           <colgroup><col style="width:72px"><col style="width:168px"><col style="width:150px"><col><col style="width:150px"></colgroup>
           <thead><tr><th>버전</th><th>시각</th><th>내용</th><th>메모</th><th></th></tr></thead>
           <tbody>
+            <tr v-if="!settingsHistory.length"><td colspan="5" class="muted">저장된 설정 없음 — .env 초기값을 보여주는 중</td></tr>
             <tr v-for="h in settingsHistory" :key="h.version" :class="{ sel: h.version === settingsVersion }">
               <td>v{{ h.version }}<span v-if="h.version === settingsVersion" class="muted small"> (현재)</span></td>
               <td>{{ fmtTime(h.created_at) }}</td>

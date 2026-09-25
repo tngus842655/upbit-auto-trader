@@ -77,6 +77,7 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.danger { background: #5f1f1f; border-color: #7a2a2a; color: #ffb4b4; }
 button.small { padding: 3px 8px; font-size: 12px; }
 .note { background: var(--panel2); border-left: 3px solid var(--accent); padding: 8px 10px; border-radius: 6px; font-size: 13px; }
+.note.warnnote { border-left-color: var(--warn); }
 .errors { color: var(--neg); font-size: 13px; margin: 6px 0 0; padding-left: 18px; }
 .livebox { margin-top: 12px; padding: 10px; border: 1px solid #7a2a2a; border-radius: 8px; background: #2a1414; display: flex; flex-direction: column; gap: 6px; }
 .livebox code { background: #3a1a1a; padding: 1px 5px; border-radius: 4px; }

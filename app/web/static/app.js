@@ -90,6 +90,7 @@
           sort: { key: "acc_trade_price_24h", desc: true } },
         marketCatalog: {},  // 코드 → 한글 이름
         loadedVersion: null,  // 이력에서 폼에 불러온 버전
+        importedPaperVersion: null,  // 실거래 폼에 가져온 모의매매 설정 버전 (저장 전 안내용)
         // 백테스트 탭
         bt: { marketsText: "", interval: "", years: {}, recent: { 3: false, 6: false, 12: false }, custom: { enabled: false, start: "", end: "" },
           capital: 1000000, feePct: 0.05, slippagePct: 0.05, useRisk: false, submitting: false, error: null,
@@ -209,13 +210,16 @@
       },
       commandLabel(v) { return { pause: "일시정지", resume: "재개", stop: "정지", halt: "긴급 정지", resume_risk: "긴급 정지 해제", reload: "설정 다시 읽기", kill: "강제 종료" }[v] || v; },
       saveToken() { localStorage.setItem("token", this.token); this.connectWs(); },
-      switchMode() { localStorage.setItem("mode", this.mode); this.loadAll(); this.connectWs(); },
+      // 설정·로그는 모드마다 따로 저장되므로 모드를 바꾸면 바로 다시 불러온다 (새로고침 전까지 이전 모드 설정이 남던 문제)
+      switchMode() { localStorage.setItem("mode", this.mode); this.loadAll(); this.connectWs(); this.loadSettings(); this.loadLogs(); },
+      // opts.mode: 화면 모드가 아닌 다른 모드를 읽을 때 (예: 실거래 화면에서 모의매매 설정 가져오기)
       async api(path, opts) {
-        const o = Object.assign({ headers: {} }, opts || {});
+        const { mode, ...rest } = opts || {};
+        const o = Object.assign({ headers: {} }, rest);
         if (this.token) o.headers["X-Auth-Token"] = this.token;
         if (o.body && typeof o.body !== "string") { o.body = JSON.stringify(o.body); o.headers["Content-Type"] = "application/json"; }
         const sep = path.includes("?") ? "&" : "?";
-        const res = await fetch(`${path}${sep}mode=${this.mode}`, o);
+        const res = await fetch(`${path}${sep}mode=${mode || this.mode}`, o);
         const text = await res.text();
         let data = null; try { data = text ? JSON.parse(text) : null; } catch (e) { data = { detail: text }; }
         if (!res.ok) { const d = data && data.detail; throw new Error(Array.isArray(d) ? d.map((x) => `${x.field || ""} ${x.message || x.msg || ""}`).join("; ") : (d || res.statusText)); }
@@ -241,11 +245,13 @@
         try { this.meta = await this.api("/api/strategy"); if (!this.form) await this.loadSettings(); } catch (e) { /* noop */ }
       },
       async loadSettings() {
+        const mode = this.mode;
         try {
           const s = await this.api("/api/settings");
+          if (mode !== this.mode) return;  // 응답 전에 모드를 또 바꿨으면 버린다 — 다른 모드 설정을 폼에 채워 저장하지 않도록
           this.settingsVersion = s.version; this.settingsHistory = s.history;
           this.fillForm(s.data, "");
-          this.loadedVersion = null;
+          this.loadedVersion = null; this.importedPaperVersion = null;
           if (!this.picker.data && !this.picker.loading) this.loadMarketCatalog();  // 선택된 마켓의 한글 이름 표시용
           this.syncBacktestFromSettings();
           if (!this.btDefaults.years.length) this.loadBacktestDefaults();
@@ -268,6 +274,16 @@
           this.fillForm(s.data, `v${v} 설정 복원`); this.loadedVersion = v;
           this.notify(`v${v} 설정을 불러왔습니다. 저장을 누르면 새 버전으로 적용됩니다`, "ok");
         } catch (e) { this.notify("불러오기 실패: " + e.message, "bad"); }
+      },
+      // 실거래 화면 전용: 모의매매 최신 설정을 폼에 채운다. 저장은 사용자가 확인하고 직접 누른다
+      async importPaperSettings() {
+        try {
+          const s = await this.api("/api/settings", { mode: "paper" });
+          if (this.mode !== "live") return;
+          this.fillForm(s.data, `모의매매 v${s.version} 설정 가져옴`);
+          this.loadedVersion = null; this.importedPaperVersion = s.version;
+          this.notify(`모의매매 v${s.version} 설정을 폼에 채웠습니다. 금액 항목을 확인한 뒤 저장하세요`, "ok");
+        } catch (e) { this.notify("가져오기 실패: " + e.message, "bad"); }
       },
       async restoreSettingsVersion(v) {
         if (!confirm(`v${v} 설정을 새 버전으로 바로 저장합니다. 계속할까요?`)) return;
@@ -295,6 +311,7 @@
         try {
           this.saveResult = await this.api("/api/settings", { method: "PUT", body: { data, note: this.form.note } });
           this.notify(`설정 v${this.saveResult.version} 저장됨`, "ok");
+          this.loadedVersion = null; this.importedPaperVersion = null;  // '저장 전' 안내는 내린다
           const s = await this.api("/api/settings"); this.settingsVersion = s.version; this.settingsHistory = s.history;
         } catch (e) { this.formErrors = e.message.split("; "); this.notify("저장 실패", "bad"); }
         this.saving = false;
