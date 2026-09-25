@@ -16,7 +16,15 @@ from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime
 
-from app.notify.base import ALL_KINDS, EventKind, NotificationEvent, Notifier, NotifyError
+from app.notify.base import (
+    ALL_KINDS,
+    BURST_KINDS,
+    PRIORITY_KINDS,
+    EventKind,
+    NotificationEvent,
+    Notifier,
+    NotifyError,
+)
 
 log = logging.getLogger(__name__)
 
@@ -74,18 +82,19 @@ class NotificationManager:
         if not self.is_enabled(event.kind):
             self.stats.suppressed += 1
             return False
-        if event.key:
-            last = self._last_keyed.get(event.key)
+        key = event.key
+        if key is None and event.kind in BURST_KINDS:
+            # 거부·오류는 장애 중 1초마다 반복될 수 있다 → 마켓·종류·사유 단위로 자동 쿨다운 (감사 MEDIUM-11)
+            key = event.auto_key()
+        if key:
+            last = self._last_keyed.get(key)
             now = self.clock()
             if last is not None and (now - last).total_seconds() < self.error_cooldown_seconds:
                 self.stats.suppressed += 1
                 return False
-            self._last_keyed[event.key] = now
+            self._last_keyed[key] = now
         if self._queue.full():
-            with contextlib.suppress(asyncio.QueueEmpty):
-                self._queue.get_nowait()
-                self._queue.task_done()
-                self.stats.dropped += 1
+            self._evict_one()
         try:
             self._queue.put_nowait(event)
         except asyncio.QueueFull:  # pragma: no cover - 위에서 자리를 비웠으므로 거의 없음
@@ -93,6 +102,21 @@ class NotificationManager:
             return False
         self.stats.queued += 1
         return True
+
+    def _evict_one(self) -> None:
+        """큐가 찼을 때 자리 하나를 비운다 — 낮은 우선순위(거부·오류·정보) 중 가장 오래된 것, 없으면 가장 오래된 것."""
+        items: list[NotificationEvent] = []
+        with contextlib.suppress(asyncio.QueueEmpty):
+            while True:
+                items.append(self._queue.get_nowait())
+                self._queue.task_done()
+        victim = next((i for i, e in enumerate(items) if e.kind not in PRIORITY_KINDS), 0 if items else None)
+        if victim is not None:
+            dropped = items.pop(victim)
+            self.stats.dropped += 1
+            log.warning("알림 큐 가득 참 → 버림: [%s] %s", dropped.label, dropped.title)
+        for item in items:
+            self._queue.put_nowait(item)
 
     async def start(self) -> None:
         if self._worker is None and self.notifiers:

@@ -161,7 +161,7 @@ copy .env.example .env      # Windows
 | 이벤트 (`NOTIFY_EVENTS` 이름) | 언제 |
 | --- | --- |
 | `buy` / `sell` | 전략 신호가 리스크 검사를 통과해 시장가 주문을 낼 때 (금액·수량·사유) |
-| `order_filled` / `order_rejected` | 체결 확인(수량·체결가·수수료·매도면 손익·현금) / 주문 거부·미체결 |
+| `order_filled` / `order_rejected` | 체결 확인(수량·체결가·수수료·매도면 손익·현금) / 주문 거부·미체결 — 거부는 마켓·방향·사유가 같으면 `NOTIFY_ERROR_COOLDOWN_SECONDS` 동안 한 번만 |
 | `stop_loss` / `take_profit` / `trailing_stop` | 실시간 청산 감시가 발동해 매도 주문을 낼 때 (기준가·현재가·등락률) |
 | `daily_loss_limit` / `consecutive_loss_limit` | 일일 손실·연속 손실 한도 도달 → 당일 신규 진입 잠금 |
 | `risk_halt` | 긴급 정지(halt)·해제 |
@@ -172,7 +172,7 @@ copy .env.example .env      # Windows
 
 - Telegram: [@BotFather](https://t.me/BotFather) 에서 `/newbot` 으로 봇을 만들어 토큰을 `TELEGRAM_BOT_TOKEN` 에 넣는다. 채널로 받으려면 채널 관리자에 봇을 추가(메시지 게시 권한)하고 메시지를 하나 올린 뒤 `notify-test --discover-telegram` 을 실행하면 채널 ID(`-100…`)가 나온다. 그 값을 `TELEGRAM_CHAT_ID` 에 넣는다(개인 대화면 봇에게 /start 를 보낸 뒤 같은 명령). Discord: 채널 설정 > 연동 > 웹훅 URL 을 `DISCORD_WEBHOOK_URL` 에.
 - `NOTIFY_EVENTS=all`(기본) / `off` / `buy,sell,stop_loss` 처럼 골라 받는다. 설정 후 `notify-test` 로 발송을 확인하거나 대시보드 제어 탭의 "테스트 발송" 을 누른다.
-- 알림은 매매를 멈추지 않는다: 엔진은 이벤트를 큐에 넣기만 하고, 별도 태스크가 전송한다. 실패는 재시도(2회) 후 `bot_logs` 에 `notify_failed` 로만 남는다. 토큰·웹훅 URL 은 로그·오류 메시지에서 가려진다.
+- 알림은 매매를 멈추지 않는다: 엔진은 이벤트를 큐에 넣기만 하고, 별도 태스크가 전송한다. 실패는 재시도(2회) 후 `bot_logs` 에 `notify_failed` 로만 남는다. 큐(500개)가 차면 거부·오류·정보 알림부터 버리고 손절·익절·정지·체결·시작/종료 알림은 남긴다. 토큰·웹훅 URL 은 로그·오류 메시지에서 가려진다.
 - 새 채널(Slack 등)은 `app/notify/` 에 `Notifier` 프로토콜(`name`, `send`, `aclose`) 구현 하나를 더하고 `build_notification_manager` 에 한 줄 추가하면 된다.
 
 ### 파라미터 스윕 (전략 튜닝)

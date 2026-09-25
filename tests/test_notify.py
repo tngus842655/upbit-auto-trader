@@ -312,3 +312,32 @@ async def test_engine_run_sends_start_and_stop(make_settings) -> None:
     assert "정상 종료" in fake.sent[-1].title and "현금" in fake.sent[-1].message
     assert h.engine.stats.extra["notifications"]["sent"] == len(fake.sent)
     assert fake.closed
+
+
+async def test_burst_kinds_get_auto_key_and_priority_eviction() -> None:
+    """감사 MEDIUM-11 — key 없는 거부·오류 알림도 마켓·사유 단위로 쿨다운되고, 큐가 차면 낮은 우선순위부터 버린다."""
+    fake = FakeNotifier()
+    now = datetime(2026, 9, 24, tzinfo=UTC)
+    m = NotificationManager([fake], error_cooldown_seconds=300, clock=lambda: now, max_queue=3)
+
+    def rejected(market: str, why: str) -> NotificationEvent:
+        return NotificationEvent(kind=EventKind.ORDER_REJECTED, title=f"{market} 매도", message=why)
+
+    assert m.emit(rejected("KRW-BTC", "체결 확인 실패")) is True
+    assert m.emit(rejected("KRW-BTC", "체결 확인 실패")) is False  # 같은 마켓·사유 반복 → 쿨다운
+    assert m.emit(rejected("KRW-BTC", "잔고 부족")) is True  # 다른 사유
+    assert m.emit(rejected("KRW-ETH", "체결 확인 실패")) is True  # 다른 마켓
+    assert m.stats.suppressed == 1
+    # 큐(3)가 찬 상태에서 손절 알림 → 가장 오래된 거부 알림을 버리고 손절을 넣는다
+    assert m.emit(NotificationEvent(kind=EventKind.STOP_LOSS, title="KRW-BTC", message="손절")) is True
+    assert m.stats.dropped == 1
+    # 다시 찬 상태에서 손절이 또 오면 남은 거부(낮은 우선순위)를 버린다 — 손절은 버리지 않는다
+    assert m.emit(NotificationEvent(kind=EventKind.TRAILING_STOP, title="KRW-ETH", message="추적")) is True
+    await m.flush()
+    kinds = [e.kind for e in fake.sent]
+    assert kinds.count(EventKind.STOP_LOSS) == 1 and kinds.count(EventKind.TRAILING_STOP) == 1
+    assert kinds.count(EventKind.ORDER_REJECTED) == 1 and m.stats.dropped == 2
+    # 쿨다운이 지나면 같은 사유도 다시 간다
+    now += timedelta(seconds=301)
+    m.clock = lambda: now
+    assert m.emit(rejected("KRW-BTC", "체결 확인 실패")) is True

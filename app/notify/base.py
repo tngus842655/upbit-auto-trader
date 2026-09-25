@@ -39,6 +39,15 @@ class EventKind(StrEnum):
 
 ALL_KINDS: tuple[EventKind, ...] = tuple(EventKind)
 
+# 장애 상황에서 같은 내용이 반복될 수 있는 종류 — key 가 없어도 마켓·종류·사유 단위로 자동 쿨다운한다 (감사 MEDIUM-11)
+BURST_KINDS: frozenset[EventKind] = frozenset({EventKind.ORDER_REJECTED, EventKind.API_ERROR})
+# 큐가 찼을 때 끝까지 지켜야 하는 종류 — 낮은 우선순위(거부·오류·정보)부터 버린다
+PRIORITY_KINDS: frozenset[EventKind] = frozenset({
+    EventKind.STOP_LOSS, EventKind.TAKE_PROFIT, EventKind.TRAILING_STOP, EventKind.RISK_HALT,
+    EventKind.DAILY_LOSS_LIMIT, EventKind.CONSECUTIVE_LOSS_LIMIT, EventKind.ORDER_FILLED, EventKind.BOT_START,
+    EventKind.BOT_STOP,
+})
+
 LABELS: dict[EventKind, str] = {
     EventKind.BUY: "매수",
     EventKind.SELL: "매도",
@@ -88,6 +97,10 @@ class NotificationEvent:
     @property
     def label(self) -> str:
         return LABELS[self.kind]
+
+    def auto_key(self) -> str:
+        """key 가 없는 반복성 이벤트의 쿨다운 단위: 종류 + 제목(마켓·방향) + 사유 앞부분."""
+        return f"{self.kind.value}:{self.title}:{self.message[:60]}"
 
     def to_dict(self) -> dict[str, Any]:
         return {
