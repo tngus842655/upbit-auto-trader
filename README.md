@@ -92,6 +92,7 @@ copy .env.example .env      # Windows
 | `CANDLE_ANOMALY_PCT` | `0.3` | 직전 종가 대비 이 비율(30%) 넘게 튄 캔들은 이상치로 보고 그 캔들의 신호를 실행하지 않는다(기록·알림만). 고저 모순·0 가격 캔들 응답은 지표에 넣지 않고 다음 점검에서 다시 받는다 |
 | `EXIT_CONFIRM_TICKS` | `2` | 손절·익절·추적 손절 조건이 연속 이만큼의 시세에서 관측돼야 매도(단일 이상 틱 방어). 캔들 경계의 REST 보정 점검은 즉시 |
 | `PRICE_MAX_AGE_SECONDS` | `30` | 이보다 오래된 시세로는 체결하지 않음 — PAPER·LIVE 모두 시세가 없거나 오래되면 주문을 보류하고 거부로 기록 |
+| `DB_RETENTION_DAYS` | `90` | `bot_logs`·`balances` 보존 일수. 엔진 시작 때 그 이전 행을 지운다(주문·체결·왕복·신호는 유지, `0` = 무제한) |
 | `LOG_LEVEL` / `LOG_DIR` | `INFO` / `logs` | 로그 레벨, 로그 폴더 (`logs/trader.log`, 10MB×5 회전) |
 | `DASHBOARD_HOST` / `DASHBOARD_PORT` | `127.0.0.1` / `8000` | 대시보드(`serve`) 바인드 주소·포트. 외부 바인드는 토큰 필수 |
 | `DASHBOARD_TOKEN` | 없음 | 설정하면 대시보드의 **모든** API·WebSocket 에 `X-Auth-Token` 헤더 필요(조회 포함). 없으면 로컬 호스트만 허용 |

@@ -20,3 +20,18 @@ async def test_engine_applies_dashboard_cash_flows(make_settings) -> None:
     assert any(e.event == "cash_flow_applied" for e in h.repo.recent_logs(5))
     # 리스크 상태 저장소에 남아 재시작 후에도 이어진다
     assert h.engine.risk.store.load()["cash_flow_cursor"] == 2
+
+
+async def test_engine_purges_old_records_on_start(make_settings) -> None:
+    """감사 LOW-9 — 엔진이 시작할 때 DB_RETENTION_DAYS(기본 90일) 이전 로그를 정리한다."""
+    from datetime import timedelta
+
+    from app.database.models import BotLog, to_db_time
+
+    h = Harness(make_settings)
+    with h.repo.db.session() as s:
+        s.add(BotLog(mode="paper", level="INFO", event="ancient", message="x",
+                     time=to_db_time(h.now - timedelta(days=200))))
+    assert h.engine._purge_old_records() == {"bot_logs": 1, "balances": 0}
+    assert h.engine._purge_old_records() == {"bot_logs": 0, "balances": 0}
+    assert any(e.event == "db_purge" for e in h.repo.recent_logs(5))

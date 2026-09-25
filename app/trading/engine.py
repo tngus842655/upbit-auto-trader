@@ -227,6 +227,21 @@ class TradingEngine:
                      self.state.last_closed_time(market))
         self._round_trips_saved = len(self.portfolio.trades)
 
+    def _purge_old_records(self) -> dict[str, int]:
+        """보존 일수(DB_RETENTION_DAYS)를 넘긴 로그·잔고 스냅샷을 정리한다 (감사 LOW-9). 실패해도 시작을 막지 않는다."""
+        days = int(getattr(self.settings, "db_retention_days", 0) or 0)
+        if days <= 0:
+            return {}
+        try:
+            purged = self.repo.purge_old_rows(days, self.clock())
+        except Exception as exc:  # noqa: BLE001
+            log.warning("오래된 기록 정리 실패: %s", exc)
+            return {}
+        if any(purged.values()):
+            log.info("오래된 기록 정리 (%d일 이전): %s", days, purged)
+            self._log_safely("INFO", "db_purge", f"{days}일 이전 기록 정리", purged)
+        return purged
+
     def rebuild_risk_state(self, now: datetime, equity: float | None) -> None:
         """재시작 시 오늘(KST) 청산 거래로 연속 손실·일일 손익을 복구한다."""
         if not isinstance(self.risk, RiskManager):
@@ -1005,6 +1020,7 @@ class TradingEngine:
         if stale:
             self.repo.log("WARNING", "stale_commands", f"시작 전 대기 명령 {stale}건 무시", {"count": stale})
             log.warning("엔진 시작 전 대기 명령 %d건 무시", stale)
+        self._purge_old_records()
         if self.notifier is not None:
             await self.notifier.start()
         restored = len(self.portfolio.positions)

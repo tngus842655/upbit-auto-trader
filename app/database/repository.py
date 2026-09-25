@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pandas as pd
@@ -445,7 +445,20 @@ class Repository:
 
     def count_rows(self, model: type) -> int:
         with self.db.session() as s:
-            return len(list(s.execute(select(model)).scalars()))
+            return int(s.execute(select(func.count()).select_from(model)).scalar() or 0)  # COUNT 쿼리 (감사 LOW-9)
+
+    def purge_old_rows(self, days: int, now: datetime | None = None) -> dict[str, int]:
+        """``days`` 일보다 오래된 bot_logs·balances 행을 지운다 (감사 LOW-9). 주문·체결·왕복·신호는 남긴다.
+        지운 행 수를 돌려준다."""
+        if days <= 0:
+            return {}
+        cutoff = to_db_time((now or datetime.now(UTC)) - timedelta(days=days))
+        with self.db.session() as s:
+            logs = s.execute(delete(BotLog).where(BotLog.mode == self.mode, BotLog.time < cutoff)).rowcount
+            balances = s.execute(
+                delete(BalanceSnapshot).where(BalanceSnapshot.mode == self.mode, BalanceSnapshot.time < cutoff)
+            ).rowcount
+        return {"bot_logs": int(logs or 0), "balances": int(balances or 0)}
 
     def candle_times(self, market: str, interval: str) -> Iterable[datetime]:
         with self.db.session() as s:

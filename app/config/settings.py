@@ -154,6 +154,8 @@ class Settings(BaseSettings):
     position_fraction: float = Field(default=1.0, gt=0, le=1.0, description="매수 시 현금 사용 비율")
     warmup_candles: int = Field(default=300, ge=10, le=2000, description="시작 시 받아 둘 과거 캔들 수")
     snapshot_interval_seconds: int = Field(default=300, ge=10, description="자산 스냅샷 주기(초)")
+    db_retention_days: int = Field(default=90, ge=0,
+                                   description="bot_logs·balances 보존 일수 (엔진 시작 시 정리, 0 = 무제한)")
     candle_grace_seconds: float = Field(default=3.0, ge=0, le=60, description="캔들 경계 후 확정 대기(초)")
     price_max_age_seconds: float = Field(default=30.0, gt=0, description="이보다 오래된 시세로는 체결하지 않음")
     candle_anomaly_pct: float = Field(default=0.3, gt=0, le=5,

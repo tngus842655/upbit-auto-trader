@@ -199,3 +199,21 @@ def test_save_runtime_settings_retries_on_version_race(repo: Repository, monkeyp
     monkeypatch.setattr(repo, "runtime_settings_version", lambda: 1)  # 계속 낡은 값 → 한도 뒤 포기
     with pytest.raises(RuntimeError, match="계속 겹칩니다"):
         repo.save_runtime_settings({"a": 4}, "v4", attempts=2)
+
+
+def test_count_rows_and_purge_old_rows(repo: Repository) -> None:
+    """감사 LOW-9 — COUNT 로 세고, 보존 일수보다 오래된 로그·잔고 스냅샷만 지운다 (거래 기록은 그대로)."""
+    now = datetime(2026, 9, 25, tzinfo=UTC)
+    portfolio = Portfolio(1_000_000)
+    repo.snapshot_balance(portfolio, {}, now - timedelta(days=120))
+    repo.snapshot_balance(portfolio, {}, now - timedelta(days=10))
+    with repo.db.session() as s:
+        old = to_db_time(now - timedelta(days=100))
+        s.add(BotLog(mode="paper", level="INFO", event="old", message="오래됨", time=old))
+        s.add(BotLog(mode="live", level="INFO", event="old", message="다른 모드", time=old))
+    repo.log("INFO", "fresh", "최근")
+    assert repo.count_rows(BotLog) == 3 and repo.count_rows(BalanceSnapshot) == 2
+    assert repo.purge_old_rows(0) == {}  # 0 = 무제한
+    assert repo.purge_old_rows(90, now) == {"bot_logs": 1, "balances": 1}
+    assert [e.event for e in repo.recent_logs(5)] == ["fresh"]  # 다른 모드의 오래된 행은 남는다
+    assert repo.count_rows(BotLog) == 2 and repo.count_rows(BalanceSnapshot) == 1
