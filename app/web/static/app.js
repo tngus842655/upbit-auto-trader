@@ -6,10 +6,42 @@
   const isoDate = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
 
   const RISK_LABELS = {
-    position_fraction: "현금 사용 비율", max_order_amount: "거래당 최대 투자금 (KRW)", max_position_ratio: "자산 대비 포지션 상한",
-    max_open_positions: "최대 포지션 수", daily_loss_limit_pct: "일일 손실 한도", max_consecutive_losses: "최대 연속 손실",
-    stop_loss_pct: "손절 비율", take_profit_pct: "익절 비율", trailing_stop_pct: "추적 손절 비율",
-    price_deviation_limit: "시세 괴리 한도", min_order_amount: "최소 주문 금액 (KRW)", cooldown_seconds: "재진입 대기(초)",
+    position_fraction: "현금 사용 비율 (%)", max_order_amount: "거래당 최대 투자금 (KRW)", max_position_ratio: "자산 대비 포지션 상한 (%)",
+    max_open_positions: "최대 포지션 수", daily_loss_limit_pct: "일일 손실 한도 (%)", max_consecutive_losses: "최대 연속 손실",
+    stop_loss_pct: "손절 비율 (%)", take_profit_pct: "익절 비율 (%)", trailing_stop_pct: "추적 손절 비율 (%)",
+    price_deviation_limit: "시세 괴리 한도 (%)", min_order_amount: "최소 주문 금액 (KRW)", cooldown_seconds: "재진입 대기(초)",
+  };
+  // 엔진·API 는 0~1 소수(0.05 = 5%)를 쓰고, 화면에서는 0~100 % 로 보여주고 입력받는다
+  const PERCENT_FIELDS = new Set(["position_fraction", "max_position_ratio", "daily_loss_limit_pct", "stop_loss_pct",
+    "take_profit_pct", "trailing_stop_pct", "price_deviation_limit"]);
+  const toPercent = (v) => (v == null || v === "" ? v : Math.round(Number(v) * 100 * 10000) / 10000);
+  const fromPercent = (v) => (v == null || v === "" ? v : Math.round(Number(v) / 100 * 1e8) / 1e8);
+  // 항목별 도움말 (? 아이콘 툴팁)
+  const HELP = {
+    markets: "봇이 거래할 원화 마켓 목록입니다. 여기 없는 코인은 보지도, 팔지도 않습니다.\n바꾸면 엔진 재시작(정지 → 시작)이 필요합니다.",
+    candle_interval: "전략이 판단하는 캔들 길이입니다. 캔들이 닫힐 때마다 한 번 판단하므로 짧을수록 신호와 거래가 잦고 수수료 부담이 커집니다.\n주·월·연 캔들은 엔진에서 쓸 수 없습니다. 바꾸면 엔진 재시작이 필요합니다.",
+    strategy_name: "신호를 만드는 규칙입니다.\nma_cross = 단기/장기 이동평균 교차(추세 추종)\nrsi = RSI 과매도 탈출 매수 / 과매수 이탈 매도\n바꾸면 파라미터가 기본값으로 초기화됩니다.",
+    short_window: "단기 이동평균 기간(캔들 수)입니다. 단기선이 장기선을 아래→위로 뚫는 캔들(골든크로스)에서 매수 신호, 위→아래(데드크로스)에서 매도 신호가 납니다.\n값을 줄이면 신호가 잦아지지만 잔파도에 자주 걸리고, 키우면 느리지만 큰 추세만 탑니다.",
+    long_window: "장기 이동평균 기간(캔들 수)입니다. 단기선보다 커야 합니다.\n이 길이만큼 캔들이 쌓여야 첫 신호가 납니다(15분봉 200 = 약 50시간).",
+    volume_window: "거래량 필터의 평균 기간(캔들 수)입니다. 0이면 거래량 필터를 끕니다.",
+    volume_factor: "골든크로스 캔들의 거래량이 '최근 N캔들 평균 × 이 배수' 이상일 때만 매수합니다. 1 = 평균 이상, 2 = 평균의 2배 이상.\n거래량 없는 밋밋한 교차를 거릅니다. 매도에는 적용되지 않고, 걸러진 신호는 다음 골든크로스까지 다시 시도하지 않습니다.",
+    rsi_window: "RSI 계산 기간(캔들 수)입니다. 0이면 RSI 필터를 끄고 오른쪽 값은 무시됩니다.",
+    rsi_max_for_buy: "골든크로스라도 RSI가 이 값보다 높으면(과매수) 매수하지 않습니다. 매도에는 영향이 없습니다. 보통 70~80.",
+    window: "RSI 계산 기간(캔들 수)입니다. 짧을수록 민감하게 움직입니다. 보통 14.",
+    oversold: "과매도선입니다. RSI가 이 값 아래로 내려갔다가 다시 위로 올라오는 캔들에서 매수합니다(과매도 탈출). 보통 25~35.",
+    overbought: "과매수선입니다. RSI가 이 값 위에 있다가 아래로 내려오는 캔들에서 매도합니다(과매수 이탈). 보통 65~75. 과매도선보다 커야 합니다.",
+    position_fraction: "한 번 매수할 때 현재 현금의 몇 퍼센트까지 쓸지 정합니다. 100% = 현금 전부, 50% = 절반.\n'거래당 최대 투자금'·'자산 대비 포지션 상한'이 이 예산을 더 줄일 수 있습니다.",
+    max_order_amount: "한 번의 매수에 쓰는 금액 상한(KRW)입니다. 현금이 더 많아도 이 금액까지만 삽니다.\n체크를 풀면 상한이 없습니다.",
+    max_position_ratio: "보유 코인 평가액 합이 총자산(현금+코인)의 이 퍼센트를 넘지 않게 매수 예산을 줄입니다.\n100% = 제한 없음, 50% = 자산의 절반까지만 코인 보유.",
+    max_open_positions: "동시에 보유할 수 있는 마켓 수입니다. 1이면 한 코인을 들고 있는 동안 다른 코인은 사지 않습니다.\n같은 코인 추가 매수는 하지 않습니다.",
+    daily_loss_limit_pct: "당일(한국 시간 자정 기준) 시작 자산 대비 평가 손실이 이 퍼센트에 닿으면(3 = -3%) 그날은 신규 매수를 멈춥니다.\n손절·매도는 계속되고 다음 날 자동으로 풀립니다. 대시보드로 옮긴 입출금은 손실로 치지 않습니다. 체크를 풀면 끕니다.",
+    max_consecutive_losses: "매도로 확정된 손실 거래가 연속 이 횟수면 그날 신규 매수를 멈춥니다.\n이익 거래가 한 번 나오면 0으로 돌아가고, 다음 날 풀립니다. 체크를 풀면 끕니다.",
+    stop_loss_pct: "평균 매수가보다 이 퍼센트만큼 내려가면(5 = -5%) 캔들을 기다리지 않고 실시간 시세로 시장가 매도합니다.\n1초마다 감시하고, 튄 시세 한 번으로 팔지 않도록 연속 두 번 확인한 뒤 실행합니다. 체크를 풀면 끕니다.",
+    take_profit_pct: "평균 매수가보다 이 퍼센트만큼 오르면(10 = +10%) 매도합니다.\n체크를 풀면 데드크로스(전략 매도 신호)까지 보유합니다.",
+    trailing_stop_pct: "매수 후 최고가를 기억했다가 거기서 이 퍼센트만큼 떨어지면 매도합니다(10 = 고점 대비 -10%).\n오른 만큼의 이익을 지키는 용도입니다. 체크를 풀면 끕니다.",
+    price_deviation_limit: "신호 캔들 종가와 실제 주문 순간 현재가의 차이가 이 퍼센트(10 = 10%)를 넘으면 매수하지 않습니다.\n정체 뒤 뒤늦은 진입이나 급등 추격을 막습니다. 체크를 풀면 끕니다.",
+    min_order_amount: "계산된 매수 예산이 이 금액(KRW)보다 작으면 사지 않습니다.\n업비트 원화 마켓 최소 주문은 5,000원이라 더 낮추면 거래소가 거부합니다.",
+    cooldown_seconds: "한 마켓을 청산(매도·손절)한 뒤 이 시간(초) 동안은 같은 마켓을 다시 사지 않습니다. 0 = 바로 가능.",
   };
 
   function schemaFields(schema) {
@@ -106,7 +138,11 @@
         });
       },
       paramFields() { return this.form ? schemaFields(this.meta.schemas[this.form.strategy_name]) : []; },
-      riskFields() { return schemaFields(this.meta.risk_schema); },
+      riskFields() {
+        return schemaFields(this.meta.risk_schema).map((f) => PERCENT_FIELDS.has(f.name)
+          ? Object.assign({}, f, { percent: true, min: 0, max: 100, step: 0.1, desc: "0~100" })
+          : f);
+      },
     },
     methods: {
       // ---------- 유틸
@@ -116,6 +152,36 @@
       sign(v) { return v == null ? "" : v > 0 ? "pos" : v < 0 ? "neg" : ""; },
       fmtTime(iso) { if (!iso) return "-"; const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString("ko-KR", { hour12: false }); },
       riskLabel(name) { return RISK_LABELS[name] || name; },
+      help(name) { return HELP[name] || ""; },
+      clampPercent(f) {
+        // 비율 항목은 0~100 밖의 값을 받지 않는다 (입력 즉시 되돌림)
+        if (!f.percent) return;
+        const v = this.form.risk[f.name];
+        if (v === "" || v == null) return;
+        if (v > 100) this.form.risk[f.name] = 100;
+        else if (v < 0) this.form.risk[f.name] = 0;
+      },
+      riskPayload() {
+        // 화면(0~100 %) → API(0~1 소수). 켜져 있는 비율 항목이 0~100 을 벗어나거나 0 이면 저장하지 않는다
+        const risk = {};
+        const problems = [];
+        for (const f of this.riskFields) {
+          const raw = this.form.risk[f.name];
+          const off = f.nullable && !this.form.riskEnabled[f.name];
+          if (off || raw === "" || raw == null) { risk[f.name] = null; continue; }
+          if (f.percent) {
+            const v = Number(raw);
+            if (!(v >= 0 && v <= 100)) problems.push(`${this.riskLabel(f.name)}: 0~100 사이로 입력하세요 (입력값 ${raw})`);
+            else if (v === 0 && f.nullable) problems.push(`${this.riskLabel(f.name)}: 0 은 쓸 수 없습니다. 끄려면 체크를 해제하세요`);
+            else if (v === 0) problems.push(`${this.riskLabel(f.name)}: 0 보다 커야 합니다`);
+            risk[f.name] = fromPercent(v);
+          } else {
+            risk[f.name] = raw;
+          }
+        }
+        if (problems.length) throw new Error(problems.join("; "));
+        return risk;
+      },
       notify(text, kind) { this.toast = { text, kind: kind || "info" }; setTimeout(() => { if (this.toast && this.toast.text === text) this.toast = null; }, 5000); },
       // ---------- 한글 표기 (엔진·API 는 영문 코드를 쓰고 화면에서만 바꾼다)
       wsLabel(v) { return { CONNECTED: "연결됨", CONNECTING: "연결 중", RECONNECTING: "재연결 중", DISCONNECTED: "끊김", CLOSED: "종료", NOT_USED: "미사용", ERROR: "오류" }[v] || v || "-"; },
@@ -183,8 +249,10 @@
       fillForm(d, note) {
         const riskEnabled = {};
         for (const f of schemaFields(this.meta.risk_schema)) riskEnabled[f.name] = d.risk[f.name] != null;
+        const risk = Object.assign({}, d.risk);
+        for (const k of Object.keys(risk)) if (PERCENT_FIELDS.has(k)) risk[k] = toPercent(risk[k]);  // 0.05 → 5 (%)
         this.form = { marketsText: d.markets.join(","), candle_interval: d.candle_interval, strategy_name: d.strategy_name,
-          strategy_params: Object.assign({}, d.strategy_params), risk: Object.assign({}, d.risk), riskEnabled, note: note || "" };
+          strategy_params: Object.assign({}, d.strategy_params), risk, riskEnabled, note: note || "" };
         // 파라미터 기본값 채우기
         for (const f of schemaFields(this.meta.schemas[d.strategy_name])) if (this.form.strategy_params[f.name] == null) this.form.strategy_params[f.name] = f.default;
         this.saveResult = null; this.formErrors = [];
@@ -213,11 +281,8 @@
       },
       async saveSettings() {
         if (!this.form) return;
-        const risk = {};
-        for (const f of this.riskFields) {
-          const v = this.form.risk[f.name];
-          risk[f.name] = f.nullable && !this.form.riskEnabled[f.name] ? null : (v === "" ? null : v);
-        }
+        let risk;
+        try { risk = this.riskPayload(); } catch (e) { this.formErrors = e.message.split("; "); this.notify("입력값을 확인하세요", "bad"); return; }
         const data = { markets: this.form.marketsText.split(",").map((m) => m.trim()).filter(Boolean),
           strategy_name: this.form.strategy_name, strategy_params: this.form.strategy_params,
           candle_interval: this.form.candle_interval, risk };
@@ -313,8 +378,10 @@
       },
       async runBacktest() {
         if (!this.form) return;
-        const risk = {};
-        for (const f of this.riskFields) { const v = this.form.risk[f.name]; risk[f.name] = f.nullable && !this.form.riskEnabled[f.name] ? null : (v === "" ? null : v); }
+        let risk = null;
+        if (this.bt.useRisk) {
+          try { risk = this.riskPayload(); } catch (e) { this.bt.error = e.message; this.notify("리스크 입력값을 확인하세요", "bad"); return; }
+        }
         const body = { markets: this.btMarkets, candle_interval: this.bt.interval || this.form.candle_interval, strategy_name: this.form.strategy_name,
           strategy_params: this.form.strategy_params, periods: this.btPeriods, initial_capital: this.bt.capital,
           fee_rate: this.bt.feePct / 100, slippage_rate: this.bt.slippagePct / 100, use_risk: this.bt.useRisk, risk: this.bt.useRisk ? risk : null,

@@ -55,6 +55,15 @@ table.kv th { width: 130px; }
 .field > span { color: var(--muted); font-size: 12px; }
 .field > span em { font-style: normal; color: #6b7386; margin-left: 4px; }
 .field.inline { flex-direction: row; align-items: center; gap: 6px; }
+.field { position: relative; }
+/* ? 도움말 아이콘 — 마우스 오버·포커스 시 항목 아래에 툴팁 */
+.help { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 2px; border-radius: 50%;
+  border: 1px solid var(--muted); color: var(--muted); font-size: 10px; font-style: normal; font-weight: 700; line-height: 1; cursor: help; vertical-align: middle; }
+.help:hover, .help:focus { color: var(--accent); border-color: var(--accent); outline: none; }
+.help::after { content: attr(data-tip); position: absolute; left: 0; top: 20px; z-index: 30; width: max-content; max-width: 100%; padding: 8px 10px;
+  border-radius: 8px; background: var(--panel2); color: var(--text); border: 1px solid var(--border); box-shadow: 0 8px 24px rgba(0, 0, 0, .5);
+  font-size: 12px; font-weight: 400; line-height: 1.5; white-space: pre-line; text-align: left; display: none; pointer-events: none; }
+.help:hover::after, .help:focus::after { display: block; }
 .row { display: flex; align-items: center; gap: 8px; }
 input, select { background: var(--panel2); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; font-size: 13px; }
 input[type=checkbox] { width: 16px; height: 16px; }

@@ -194,7 +194,7 @@
       <div class="card">
         <h3>실행 설정 <span class="muted small">DB v{{ settingsVersion }} · 저장하면 새 버전이 되고 엔진이 다음 캔들 경계에 반영합니다</span></h3>
         <div class="form" v-if="form">
-          <div class="field"><span>거래 대상 마켓 <em>재시작 필요</em></span>
+          <div class="field"><span>거래 대상 마켓 <i class="help" tabindex="0" :data-tip="help('markets')">?</i> <em>재시작 필요</em></span>
             <div class="row">
               <input :value="form.marketsText" readonly placeholder="코인 검색 버튼으로 선택하세요" title="직접 입력할 수 없습니다. 코인 검색 버튼으로 고르고 칩의 × 로 뺍니다" style="flex:1" @click="openMarketPicker">
               <button type="button" class="small" @click="openMarketPicker" title="거래 가능한 코인을 불러와 선택합니다">🔍 코인 검색</button>
@@ -204,10 +204,10 @@
               <span v-if="!selectedMarkets.length" class="muted small">선택된 마켓이 없습니다</span>
             </div>
           </div>
-          <label class="field"><span>캔들 단위 <em>재시작 필요</em></span>
+          <label class="field"><span>캔들 단위 <i class="help" tabindex="0" :data-tip="help('candle_interval')">?</i> <em>재시작 필요</em></span>
             <select v-model="form.candle_interval"><option v-for="i in meta.intervals" :key="i" :value="i">{{ i }}</option></select>
           </label>
-          <label class="field"><span>전략</span>
+          <label class="field"><span>전략 <i class="help" tabindex="0" :data-tip="help('strategy_name')">?</i></span>
             <select v-model="form.strategy_name" @change="resetParams">
               <option v-for="(desc, name) in meta.available" :key="name" :value="name">{{ name }} — {{ desc }}</option>
             </select>
@@ -215,20 +215,20 @@
           <h4>전략 파라미터</h4>
           <div class="fields">
             <label class="field" v-for="f in paramFields" :key="f.name">
-              <span>{{ f.name }} <em>{{ f.desc }}</em></span>
+              <span>{{ f.name }} <i v-if="help(f.name)" class="help" tabindex="0" :data-tip="help(f.name)">?</i> <em>{{ f.desc }}</em></span>
               <input v-if="f.type !== 'boolean'" type="number" :step="f.step" :min="f.min" :max="f.max" v-model.number="form.strategy_params[f.name]">
               <input v-else type="checkbox" v-model="form.strategy_params[f.name]">
             </label>
           </div>
           <h4>리스크 관리</h4>
           <div class="fields">
-            <label class="field" v-for="f in riskFields" :key="f.name">
-              <span>{{ riskLabel(f.name) }} <em>{{ f.desc }}</em></span>
+            <div class="field" v-for="f in riskFields" :key="f.name">
+              <span>{{ riskLabel(f.name) }} <i v-if="help(f.name)" class="help" tabindex="0" :data-tip="help(f.name)">?</i> <em>{{ f.desc }}</em></span>
               <span class="row">
                 <input v-if="f.nullable" type="checkbox" v-model="form.riskEnabled[f.name]" title="끄면 규칙을 적용하지 않음">
-                <input v-if="f.type !== 'boolean'" type="number" :step="f.step" :min="f.min" :max="f.max" v-model.number="form.risk[f.name]" :disabled="f.nullable && !form.riskEnabled[f.name]">
+                <input v-if="f.type !== 'boolean'" type="number" :step="f.step" :min="f.min" :max="f.max" v-model.number="form.risk[f.name]" :disabled="f.nullable && !form.riskEnabled[f.name]" @input="clampPercent(f)" @change="clampPercent(f)">
               </span>
-            </label>
+            </div>
           </div>
           <label class="field"><span>변경 메모</span><input v-model="form.note" placeholder="예: 손절 3%로 축소"></label>
           <div v-if="loadedVersion" class="note">v{{ loadedVersion }} 설정을 불러왔습니다. 내용을 확인한 뒤 <b>저장</b>을 누르면 새 버전으로 적용됩니다.</div>
