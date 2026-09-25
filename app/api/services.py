@@ -20,7 +20,7 @@ from app.core.exceptions import TraderError, UpbitAPIError
 from app.database.database import Database
 from app.database.models import from_db_time
 from app.database.repository import Repository
-from app.exchange.models import KST
+from app.exchange.models import KST, CandleInterval
 from app.exchange.upbit_client import UpbitClient
 
 log = logging.getLogger(__name__)
@@ -31,6 +31,35 @@ def _iso(value: datetime | None) -> str | None:
         return None
     dt = from_db_time(value) if value.tzinfo is None else value
     return dt.astimezone(KST).isoformat()
+
+
+def _candle_close(start: datetime, interval: str | None) -> datetime | None:
+    """캔들이 닫힌 시각(= 엔진이 판단한 시각) = 시작 + 길이. 길이가 일정하지 않은 월·연 캔들은 None."""
+    try:
+        iv = CandleInterval.parse(interval or "")
+    except ValueError:
+        return None
+    if iv in (CandleInterval.MON1, CandleInterval.Y1):
+        return None
+    return start + timedelta(seconds=iv.seconds)
+
+
+def _signal_rows(records: list[Any]) -> list[dict[str, Any]]:
+    """신호 표 행. time 은 업비트 표기(캔들 시작), close_time 은 캔들이 닫혀 판단한 시각 — 화면은 close_time 을 쓴다.
+    캔들 단위가 섞였으면(1m 점검 뒤 15m 등) 판단한 순서로 보이게 close_time 기준으로 다시 정렬한다(같은 시각은 그대로).
+    """
+    rows = []
+    for s in records:
+        start = from_db_time(s.time)
+        close = _candle_close(start, s.interval)
+        # id: 캔들 단위가 달라도(1m·15m) 시각·마켓이 같은 신호가 생기므로 화면 행 구분용으로 준다
+        rows.append((close or start, {
+            "id": s.id, "time": _iso(start), "close_time": _iso(close), "interval": s.interval,
+            "market": s.market, "action": s.action, "price": s.price, "reason": s.reason, "strategy": s.strategy,
+            "indicators": s.indicators,
+        }))
+    rows.sort(key=lambda r: r[0], reverse=True)
+    return [row for _, row in rows]
 
 
 class PriceCache:
@@ -256,12 +285,7 @@ class DashboardService:
     def recent(self, mode: str, limit: int = 20, *, signal_limit: int | None = None) -> dict[str, Any]:
         repo = self.repo(mode)
         return {
-            # id: 캔들 단위가 달라도(1m·15m) 시각·마켓이 같은 신호가 생기므로 화면 행 구분용으로 준다
-            "signals": [
-                {"id": s.id, "time": _iso(s.time), "market": s.market, "action": s.action, "price": s.price,
-                 "reason": s.reason, "strategy": s.strategy, "indicators": s.indicators}
-                for s in repo.recent_signals(signal_limit or limit)
-            ],
+            "signals": _signal_rows(repo.recent_signals(signal_limit or limit)),
             "orders": [
                 {"time": _iso(o.created_at), "market": o.market, "side": o.side, "status": o.status,
                  "fill_price": o.fill_price, "filled_quantity": o.filled_quantity, "fee": o.fee,

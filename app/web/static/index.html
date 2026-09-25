@@ -134,7 +134,7 @@
         <h3>현재 전략 신호</h3>
         <div v-if="latestSignal" class="signal">
           <span class="pill" :class="'sig-' + latestSignal.action.toLowerCase()">{{ actionLabel(latestSignal.action) }}</span>
-          <span>{{ latestSignal.market }} · {{ fmtTime(latestSignal.time) }} · 종가 {{ krw(latestSignal.price) }}</span>
+          <span>{{ latestSignal.market }} · {{ fmtTime(latestSignal.close_time || latestSignal.time) }} · 종가 {{ krw(latestSignal.price) }}</span>
           <div class="muted small">{{ latestSignal.reason || '조건 없음' }}</div>
           <div class="muted small" v-if="latestSignal.indicators">
             <span v-for="(v, k) in latestSignal.indicators" :key="k">{{ k }}: {{ num(v, 4) }} &nbsp;</span>
@@ -144,9 +144,9 @@
         <h3 class="mt">최근 신호 <span class="muted small" v-if="recent.signals && recent.signals.length">{{ recent.signals.length }}개 (최대 100개) · 5개 넘으면 표 안에서 스크롤</span></h3>
         <div class="signal-scroll">
         <table>
-          <thead><tr><th>시각</th><th>마켓</th><th>신호</th><th>종가</th><th>사유</th></tr></thead>
+          <thead><tr><th title="캔들이 끝난 시각 — 엔진이 이때 판단합니다 (업비트 차트는 캔들 시작 시각으로 표기)">시각</th><th>마켓</th><th>신호</th><th>종가</th><th>사유</th></tr></thead>
           <tbody>
-            <tr v-for="s in recent.signals" :key="s.id"><td>{{ fmtTime(s.time) }}</td><td>{{ s.market }}</td><td><span class="pill" :class="'sig-' + s.action.toLowerCase()">{{ actionLabel(s.action) }}</span></td><td>{{ krw(s.price) }}</td><td class="muted small">{{ s.reason }}</td></tr>
+            <tr v-for="s in recent.signals" :key="s.id"><td>{{ fmtTime(s.close_time || s.time) }}</td><td>{{ s.market }}</td><td><span class="pill" :class="'sig-' + s.action.toLowerCase()">{{ actionLabel(s.action) }}</span></td><td>{{ krw(s.price) }}</td><td class="muted small">{{ s.reason }}</td></tr>
           </tbody>
         </table>
         </div>

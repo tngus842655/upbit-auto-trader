@@ -127,6 +127,19 @@ def test_recent_signal_limit(api) -> None:
     assert client.get("/api/recent?signal_limit=201").status_code == 422
 
 
+def test_signal_close_time(api) -> None:
+    """신호 표는 캔들이 닫혀 판단한 시각을 보여준다 — 15:15 에 시작한 15분봉은 15:30. 단위가 섞이면 판단 순서로 정렬."""
+    client, repo, _, _ = api
+    start = datetime(2026, 9, 25, 6, 15, tzinfo=UTC)  # 15:15 KST
+    repo.save_signal(Signal(Action.HOLD, "KRW-BTC", start, 100.0, "ma_cross"), "15m")
+    repo.save_signal(Signal(Action.HOLD, "KRW-BTC", start + timedelta(minutes=5), 100.0, "ma_cross"), "1m")
+    rows = client.get("/api/recent?limit=5").json()["signals"]
+    assert [(r["interval"], r["time"][11:16], r["close_time"][11:16]) for r in rows] == [
+        ("15m", "15:15", "15:30"),  # 시작은 1m 보다 이르지만 판단(15:30)은 더 늦다
+        ("1m", "15:20", "15:21"),
+    ]
+
+
 def test_logs_paging_and_filters(api) -> None:
     client, repo, _, _ = api
     for i in range(250):
