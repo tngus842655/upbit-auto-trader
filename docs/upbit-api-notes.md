@@ -54,6 +54,7 @@
 - 같은 그룹의 API 는 한도를 함께 차감. 같은 포켓의 여러 API Key 도 한도를 공유(처리량을 늘리려면 포켓 분리).
 - 응답 헤더 `Remaining-Req: group=default; min=1800; sec=29` — `sec` 가 현재 잔여 요청 수, `min` 은 deprecated.
 - 429 → 다음 초 경계까지 대기 후 재시도. 418 → 429 누적으로 일시 차단(반복 시 차단 시간 증가) → 안내 시간 후 재시도.
+  * 2026-09-25 `reference/rate-limits` 원문 재확인(감사 MEDIUM-14): `Remaining-Req` 는 계속 제공되며 `min` 은 deprecated, `sec` 만 참조. `Retry-After` 헤더는 문서에 없다 — 프로젝트는 오면 따르고(초·ms·HTTP 날짜), 없으면 429 는 1초, 418 은 60초 동안 해당 그룹 요청을 멈춘다(`UpbitClient(blocked_cooldown=)`). 그룹 매핑도 원문과 일치: 개별 주문 취소 `DELETE /v1/order`·주문 조회·주문 가능 정보는 `default`(초당 30회/포켓), 주문 생성·취소 후 재주문은 `order`(12회), 주문 생성 테스트 `order-test`(8회), 주문 일괄 취소 `DELETE /v1/orders/open` 만 `order-cancel-all`(2초당 1회). 시세 그룹(market·candle·trade·ticker·orderbook)은 IP 당 초당 10회.
 - `Origin` 헤더가 포함된 요청(브라우저)은 시세 REST·WebSocket 모두 10초당 1회만 허용 → 브라우저에서 직접 호출 금지.
 
 ## Phase 1 에서 사용하는 엔드포인트

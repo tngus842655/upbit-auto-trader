@@ -64,11 +64,13 @@ class UpbitAPIError(UpbitError):
         message: str,
         *,
         remaining_req: str | None = None,
+        retry_after: float | None = None,
     ) -> None:
         self.status_code = status_code
         self.name = name
         self.message = message
         self.remaining_req = remaining_req
+        self.retry_after = retry_after  # 서버가 Retry-After 로 알려준 대기 시간(초). 없으면 None (감사 MEDIUM-14)
         super().__init__(f"HTTP {status_code} [{name}] {message}")
 
 
@@ -102,6 +104,7 @@ def make_api_error(
     message: str,
     *,
     remaining_req: str | None = None,
+    retry_after: float | None = None,
 ) -> UpbitAPIError:
     """HTTP 상태 코드에 맞는 ``UpbitAPIError`` 하위 예외를 만든다."""
     cls: type[UpbitAPIError]
@@ -117,4 +120,4 @@ def make_api_error(
         cls = UpbitServerError
     else:
         cls = UpbitAPIError
-    return cls(status_code, name, message, remaining_req=remaining_req)
+    return cls(status_code, name, message, remaining_req=remaining_req, retry_after=retry_after)

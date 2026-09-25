@@ -20,8 +20,11 @@ import time
 from collections import deque
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 
 REMAINING_REQ_HEADER = "Remaining-Req"
+RETRY_AFTER_HEADER = "Retry-After"  # 공식 문서(2026-09-25 확인)에는 없는 헤더 — 오면 따르고, 없어도 정상
 
 Clock = Callable[[], float]
 Sleeper = Callable[[float], Awaitable[None]]
@@ -82,8 +85,8 @@ def rate_limit_group_for(method: str, path: str) -> str:
 @dataclass(frozen=True)
 class RemainingReq:
     group: str
-    minute: int | None
-    second: int | None
+    minute: int | None  # 문서상 deprecated — 참조하지 않는다 (2026-09-25 확인)
+    second: int | None  # 현재 잔여 요청 수. 0 이면 잠시 뒤 다시
 
 
 def parse_remaining_req(value: str | None) -> RemainingReq | None:
@@ -108,6 +111,32 @@ def parse_remaining_req(value: str | None) -> RemainingReq | None:
             return None
 
     return RemainingReq(group=group, minute=to_int(fields.get("min")), second=to_int(fields.get("sec")))
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """``Retry-After`` 헤더(초·밀리초 숫자 또는 HTTP 날짜)를 초로 해석한다. 없거나 형식이 다르면 None.
+
+    공식 문서에는 이 헤더가 없다(429 는 "다음 초 경계까지 대기", 418 은 "응답의 차단 시간 정보 확인"). 서버가 주면
+    그 값을 따르고, 없으면 호출자가 기본 대기(429: 1초, 418: blocked_cooldown)를 쓴다 (감사 MEDIUM-14).
+    """
+    if not value:
+        return None
+    text = value.strip()
+    try:
+        number = float(text)
+    except ValueError:
+        try:
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError, IndexError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=UTC)
+        return max(0.0, (when - datetime.now(UTC)).total_seconds())
+    if number < 0:
+        return None
+    if number > 1000:  # 밀리초로 보이는 값
+        number /= 1000.0
+    return number
 
 
 class SlidingWindowLimiter:

@@ -36,6 +36,7 @@ from app.core.exceptions import (
     ConfigError,
     LiveTradingDisabledError,
     UpbitAPIError,
+    UpbitBlockedError,
     UpbitError,
     UpbitNetworkError,
     UpbitRateLimitError,
@@ -54,7 +55,7 @@ from app.exchange.models import (
     PocketTransfer,
     Ticker,
 )
-from app.exchange.rate_limiter import RateLimiter, rate_limit_group_for
+from app.exchange.rate_limiter import RateLimiter, parse_retry_after, rate_limit_group_for
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +104,7 @@ class UpbitClient:
         sleep: Sleeper = asyncio.sleep,
         retry_base_delay: float = 0.5,
         allow_orders: bool = False,
+        blocked_cooldown: float = 60.0,
     ) -> None:
         self._auth = UpbitAuth(access_key, secret_key) if access_key and secret_key else None
         # 실제 주문 API(생성·취소)는 이 플래그가 True 일 때만 호출된다. from_settings 는 LIVE 이중 플래그가
@@ -112,6 +114,7 @@ class UpbitClient:
         self._limiter = rate_limiter or RateLimiter()
         self._sleep = sleep
         self._retry_base_delay = retry_base_delay
+        self._blocked_cooldown = blocked_cooldown  # 418 에 차단 시간 안내가 없을 때 그 그룹을 막아 두는 시간(초)
         self._client = httpx.AsyncClient(
             base_url=base_url.rstrip("/"),
             timeout=timeout,
@@ -485,7 +488,13 @@ class UpbitClient:
                     return self._decode_body(response)
                 error = self._make_error(response)
                 if isinstance(error, UpbitRateLimitError):
-                    self._limiter.penalize(group, 1.0)
+                    # 429: 문서 권고는 "다음 초 경계까지 대기". Retry-After 가 오면 그 값을 따른다 (감사 MEDIUM-14)
+                    self._limiter.penalize(group, error.retry_after if error.retry_after is not None else 1.0)
+                elif isinstance(error, UpbitBlockedError):
+                    # 418: 429 누적 차단 — 안내된 시간(없으면 blocked_cooldown) 동안 그 그룹을 막아 차단이 길어지지 않게
+                    block = error.retry_after if error.retry_after is not None else self._blocked_cooldown
+                    self._limiter.penalize(group, block)
+                    log.error("%s %s 418 차단 → %s 그룹 %.0f초 동안 요청 중단", method, path, group, block)
 
             retryable = isinstance(error, UpbitNetworkError) or (
                 isinstance(error, UpbitAPIError) and error.retryable
@@ -502,6 +511,8 @@ class UpbitClient:
             raise error
 
     def _retry_delay(self, attempt: int, error: UpbitError) -> float:
+        if isinstance(error, UpbitAPIError) and error.retry_after is not None:
+            return min(max(error.retry_after, 0.1), 60.0)  # 서버가 알려준 대기 시간 (감사 MEDIUM-14)
         if isinstance(error, UpbitRateLimitError):
             return 1.0  # 문서 권고: 다음 초 경계까지 대기
         return min(self._retry_base_delay * (2 ** (attempt - 1)), 8.0)
@@ -528,5 +539,6 @@ class UpbitClient:
             name = err.get("name")
             message = str(err.get("message", message))
         return make_api_error(
-            response.status_code, name, message, remaining_req=response.headers.get("Remaining-Req")
+            response.status_code, name, message, remaining_req=response.headers.get("Remaining-Req"),
+            retry_after=parse_retry_after(response.headers.get("Retry-After")),
         )
