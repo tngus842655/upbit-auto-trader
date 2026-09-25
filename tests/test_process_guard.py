@@ -102,3 +102,31 @@ async def test_install_stop_handlers_requests_engine_stop(make_settings) -> None
                 signal.signal(getattr(signal, name), signal.SIG_DFL)
             else:
                 loop.remove_signal_handler(getattr(signal, name))
+
+
+def test_start_engine_hides_console_window(monkeypatch, tmp_path, make_settings) -> None:
+    """Windows: 엔진은 숨은 콘솔(CREATE_NO_WINDOW)로 띄운다 — DETACHED_PROCESS 면 빈 터미널 창이 뜬다."""
+    import subprocess
+
+    from app.api import process as proc
+
+    captured = {}
+
+    class FakePopen:
+        pid = 4242
+
+        def __init__(self, cmd, **kwargs):
+            captured["cmd"] = cmd
+            captured.update(kwargs)
+
+    monkeypatch.setattr(proc.subprocess, "Popen", FakePopen)
+    settings = make_settings(log_dir=str(tmp_path / "logs"))
+    assert proc.start_engine(settings, "paper") == 4242
+    assert captured["cmd"][-3:] == ["-m", "app.main", "run"] and captured["env"]["TRADING_MODE"] == "PAPER"
+    assert captured["stdin"] is subprocess.DEVNULL and captured["stdout"].closed  # 부모 쪽 로그 핸들은 닫힘 (LOW-10)
+    if os.name == "nt":
+        flags = captured["creationflags"]
+        assert flags & subprocess.CREATE_NO_WINDOW and flags & subprocess.CREATE_NEW_PROCESS_GROUP
+        assert not flags & subprocess.DETACHED_PROCESS
+    else:
+        assert captured["start_new_session"] is True

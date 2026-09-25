@@ -80,7 +80,10 @@ def start_engine(settings: Settings, mode: str, *, confirm_live: str = "", pytho
     kwargs: dict = {"cwd": str(PROJECT_ROOT), "stdout": out, "stderr": subprocess.STDOUT, "stdin": subprocess.DEVNULL,
                     "env": env}
     if os.name == "nt":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
+        # CREATE_NO_WINDOW: 숨은 콘솔을 만들어 물려준다. DETACHED_PROCESS 를 쓰면 .venv 의 python.exe(런처)가 콘솔 없이
+        # 뜨고, 그 자식인 실제 인터프리터가 새 콘솔을 만들어 빈 터미널 창이 나타난다(그 창을 닫으면 엔진이 죽는다).
+        # CREATE_NEW_PROCESS_GROUP 은 kill_engine 의 CTRL_BREAK 전달용.
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
     else:
         kwargs["start_new_session"] = True
     try:
