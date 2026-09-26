@@ -92,8 +92,10 @@ def format_report(result: BacktestResult, *, max_trades: int = 10) -> str:
     )
     lines.append(
         f"  평균 수익 {_krw(m.avg_win)} KRW ({_pct(m.avg_win_pct)}), "
-        f"평균 손실 {_krw(m.avg_loss)} KRW ({_pct(m.avg_loss_pct)})"
+        f"평균 손실 {_krw(m.avg_loss)} KRW ({_pct(m.avg_loss_pct)}), "
+        f"거래당 평균 수익률 {_pct(m.avg_trade_return)}"
     )
+    lines.append(f"  실현 손익 {_krw(m.realized_pnl)} KRW (수수료 {_krw(m.total_fees)} KRW·슬리피지 반영 후)")
     if m.mdd_peak_time:
         lines.append(f"  MDD 구간: {_kst(m.mdd_peak_time)} 고점 → {_kst(m.mdd_trough_time)} 저점")
     exits = ", ".join(f"{k} {v}" for k, v in result.exit_reason_counts().items()) or "-"
@@ -154,4 +156,6 @@ def metrics_table(metrics: PerformanceMetrics) -> dict[str, str]:
         "거래": str(metrics.total_trades),
         "승률": _ratio(metrics.win_rate),
         "PF": _num(metrics.profit_factor),
+        "거래당": _pct(metrics.avg_trade_return),
+        "실현손익": _krw(metrics.realized_pnl),
     }

@@ -1,7 +1,8 @@
 """성과 지표: 자산 곡선(equity curve)과 왕복 거래 목록으로 계산한다.
 
 - 총 수익률, 연환산 수익률(CAGR), 최대 낙폭(MDD)과 시점, 연환산 변동성, Sharpe, Sortino
-- 거래 횟수, 승률, 평균 수익/손실(금액·비율), Profit Factor, 기대값, 최대 연속 손실, 수수료 합계, 시장 노출 비율
+- 거래 횟수, 승률, 평균 수익/손실(금액·비율), 거래당 평균 수익률, Profit Factor, 기대값, 실현 손익, 최대 연속 손실,
+  수수료 합계, 시장 노출 비율
 - 암호화폐는 연중무휴 거래되므로 연환산 계수는 ``365.25일 / 캔들 길이`` 로 계산한다. 무위험 수익률은 0 으로 둔다.
 
 이 숫자들은 과거 데이터에 대한 설명일 뿐 미래 수익을 뜻하지 않는다.
@@ -103,8 +104,10 @@ class PerformanceMetrics:
     avg_loss: float
     avg_win_pct: float
     avg_loss_pct: float
+    avg_trade_return: float  # 거래당 평균 수익률 (수수료 포함 pnl_pct 평균, 거래가 없으면 NaN)
     profit_factor: float
     expectancy: float
+    realized_pnl: float  # 청산된 거래 손익 합계 (KRW, 수수료 차감 후)
     max_consecutive_losses: int
     total_fees: float
     exposure: float
@@ -171,8 +174,10 @@ def compute_metrics(
         avg_loss=float(pnls[losses_mask].mean()) if losses else 0.0,
         avg_win_pct=float(pcts[wins_mask].mean()) if wins else 0.0,
         avg_loss_pct=float(pcts[losses_mask].mean()) if losses else 0.0,
+        avg_trade_return=float(pcts.mean()) if n else math.nan,
         profit_factor=profit_factor,
         expectancy=float(pnls.mean()) if n else 0.0,
+        realized_pnl=float(pnls.sum()),
         max_consecutive_losses=max_consecutive_losses(trades),
         total_fees=total_fees,
         exposure=float(in_position.mean()) if in_position is not None and len(in_position) else 0.0,

@@ -11,6 +11,7 @@ Phase 1 에서는 연결 점검용 명령만 제공한다. 실제 매매 루프(
     python -m app.main stream KRW-BTC --types trade,orderbook --seconds 10   # WebSocket 실시간 시세
     python -m app.main signal KRW-BTC --strategy ma_cross --interval 60m      # 전략 신호 계산 (Phase 3)
     python -m app.main backtest KRW-BTC --interval 60m --start 2026-01-01     # 백테스트 (Phase 4)
+    python -m app.main backtest KRW-BTC --start 2026-01-01 --compare all      # 전략별 성과 비교 (같은 캔들·수수료)
     python -m app.main run --interval 60m                                     # 모의매매 (Phase 5, PAPER 전용)
     python -m app.main status [--mode live]                                   # 엔진 상태·계좌 조회
     python -m app.main control pause|resume|stop|halt|resume-risk             # 실행 중 엔진 제어 (Phase 7)
@@ -33,7 +34,17 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from app.backtest import BacktestConfig, BacktestEngine, format_report, load_candles, save_result
+from app.backtest import (
+    BacktestConfig,
+    BacktestEngine,
+    format_comparison,
+    format_report,
+    load_candles,
+    run_strategies,
+    save_comparison,
+    save_result,
+)
+from app.backtest.compare import parse_strategy_names
 from app.config.settings import PROJECT_ROOT, Settings, TradingMode, get_settings, parse_params_text
 from app.core.exceptions import ConfigError, TraderError
 from app.core.logging import setup_logging
@@ -46,7 +57,7 @@ from app.exchange.ws_models import WsCandle, WsMessage, WsOrderbook, WsTicker, W
 from app.notify import EventKind, NotificationEvent, NotifyError, build_notification_manager, discover_chats, get_me
 from app.risk import RiskConfig, RiskManager
 from app.risk.state_store import RepositoryRiskStateStore
-from app.strategy import check_no_lookahead, create_strategy
+from app.strategy import STRATEGIES, check_no_lookahead, create_strategy
 from app.strategy.data import candles_to_dataframe, detect_price_anomalies, drop_unclosed, validate_candles
 from app.trading.engine import TradingEngine
 from app.trading.instance_lock import InstanceLock
@@ -252,6 +263,16 @@ async def cmd_backtest(settings: Settings, args: argparse.Namespace) -> int:
         position_fraction=risk_cfg.position_fraction, risk=risk_cfg,
     )
     df = await load_candles(settings, market, interval, start, end, csv=args.csv)
+    if args.compare:
+        # 기준 전략(--strategy/--params 또는 .env)은 그 파라미터로, 나머지는 기본 파라미터로 같은 캔들·설정에서 돌린다
+        others = [create_strategy(name) for name in parse_strategy_names(args.compare) if name != strategy.name]
+        results = run_strategies(df, [strategy, *others], config, market=market, interval=interval)
+        print(format_comparison(results))
+        if not args.no_save:
+            out = Path(args.out_dir) / f"{datetime.now(KST):%Y%m%d_%H%M%S}_{market}_{interval.value}_compare"
+            save_comparison(results, out)
+            print(f"결과 저장: {out} (comparison.csv + 전략별 summary.json, trades.csv, equity.csv, signals.csv)")
+        return 0
     result = BacktestEngine(config).run(df, strategy, market=market, interval=interval)
     print(format_report(result, max_trades=args.trades))
     if not args.no_save:
@@ -733,7 +754,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_signal = sub.add_parser("signal", help="최근 캔들로 전략 신호 계산 (주문 없음)")
     p_signal.add_argument("market", nargs="?", help="마켓 코드 (생략 시 설정의 첫 마켓)")
-    p_signal.add_argument("--strategy", help="전략 이름: ma_cross, rsi (생략 시 STRATEGY_NAME)")
+    p_signal.add_argument("--strategy", help=f"전략 이름: {', '.join(STRATEGIES)} (생략 시 STRATEGY_NAME)")
     p_signal.add_argument("--interval", help="캔들 단위 (생략 시 CANDLE_INTERVAL)")
     p_signal.add_argument("--count", type=int, default=300, help="조회할 닫힌 캔들 수")
     p_signal.add_argument("--params", help="전략 파라미터: window=10,oversold=25 형식 또는 JSON 객체")
@@ -759,6 +780,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_bt.add_argument("--max-position-ratio", type=float, help="자산 대비 포지션 상한 비율")
     p_bt.add_argument("--env-risk", action="store_true", help=".env 의 RISK_* 설정을 기본으로 사용 (기본은 제한 없음)")
     p_bt.add_argument("--params", help="전략 파라미터: short_window=20,long_window=60 또는 JSON")
+    p_bt.add_argument(
+        "--compare",
+        help="여러 전략을 같은 캔들·수수료·슬리피지로 비교: all 또는 쉼표 목록 (예: macd,bollinger). "
+             "기준 전략은 --strategy/--params 값, 나머지는 기본 파라미터",
+    )
     p_bt.add_argument("--csv", help="캔들 CSV 파일 (생략 시 API 조회 + data/cache 캐시)")
     p_bt.add_argument("--out-dir", default="data/backtests", help="결과 저장 폴더")
     p_bt.add_argument("--no-save", action="store_true", help="결과 파일을 저장하지 않음")

@@ -161,10 +161,19 @@ def test_logs_paging_and_filters(api) -> None:
 def test_strategy_meta_and_settings_roundtrip(api) -> None:
     client, repo, _, _ = api
     meta = client.get("/api/strategy").json()
-    assert set(meta["available"]) == {"ma_cross", "rsi"} and "60m" in meta["intervals"]
+    assert {"ma_cross", "rsi", "macd", "bollinger", "williams_r"} <= set(meta["available"])
+    assert len(meta["available"]) == 12 and "60m" in meta["intervals"]
     assert meta["current"]["strategy_name"] == "ma_cross" and meta["version"] == 0
     assert "short_window" in meta["schemas"]["ma_cross"]["properties"]
     assert "stop_loss_pct" in meta["risk_schema"]["properties"]
+    # 전략마다 자기 파라미터만 (MACD: 기간 3개 + 0선 필터), 폼에 보일 이름·의존 관계 포함
+    macd_props = meta["schemas"]["macd"]["properties"]
+    assert list(macd_props) == ["fast_period", "slow_period", "signal_period", "zero_line_filter"]
+    assert macd_props["zero_line_filter"]["type"] == "boolean" and macd_props["zero_line_filter"]["default"] is True
+    assert meta["schemas"]["bollinger"]["properties"]["rsi_window"]["depends_on"] == "rsi_filter"
+    assert [c["name"] for c in meta["catalog"]] == list(meta["available"])
+    assert meta["families"]["MEAN_REVERSION"] == "평균 회귀"
+    assert next(c for c in meta["catalog"] if c["name"] == "volume_breakout")["family"] == "BREAKOUT"
 
     current = client.get("/api/settings").json()
     assert current["version"] == 0 and current["history"] == []

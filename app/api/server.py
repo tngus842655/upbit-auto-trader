@@ -33,7 +33,7 @@ from app.database.models import from_db_time
 from app.exchange.models import KST, CandleInterval
 from app.exchange.upbit_client import UpbitClient
 from app.notify import EventKind, NotificationEvent, build_notification_manager
-from app.strategy import available_strategies
+from app.strategy import StrategyFamily, available_strategies, strategy_catalog
 from app.trading.live_guard import LIVE_CONFIRM_PHRASE
 from app.trading.runtime_settings import RuntimeSettings
 
@@ -258,6 +258,9 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
             "current": runtime.to_dict(), "version": version,
             "available": strategies,
             "schemas": {name: RuntimeSettings.strategy_param_schema(name) for name in strategies},
+            # 계열·매수/매도 규칙·워밍업 캔들 수 (드롭다운 계열 묶음, 전략 설명, 백테스트 비교 선택용)
+            "catalog": strategy_catalog(),
+            "families": {family.value: family.label for family in StrategyFamily},
             "intervals": INTERVALS,
             "risk_schema": type(runtime.risk).model_json_schema(),
         }

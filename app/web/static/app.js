@@ -24,7 +24,7 @@
   const HELP = {
     markets: "봇이 거래할 원화 마켓 목록입니다. 여기 없는 코인은 보지도, 팔지도 않습니다.\n바꾸면 엔진 재시작(정지 → 시작)이 필요합니다.",
     candle_interval: "전략이 판단하는 캔들 길이입니다. 캔들이 닫힐 때마다 한 번 판단하므로 짧을수록 신호와 거래가 잦고 수수료 부담이 커집니다.\n주·월·연 캔들은 엔진에서 쓸 수 없습니다. 바꾸면 엔진 재시작이 필요합니다.",
-    strategy_name: "신호를 만드는 규칙입니다.\nma_cross = 단기/장기 이동평균 교차(추세 추종)\nrsi = RSI 과매도 탈출 매수 / 과매수 이탈 매도\n바꾸면 파라미터가 기본값으로 초기화됩니다.",
+    strategy_name: "신호를 만드는 규칙입니다. 추세 추종 · 평균 회귀 · 돌파 · 필터 계열로 묶여 있고, 고르면 아래에 매수·매도 규칙이 보입니다.\n모든 전략의 청산에는 리스크 관리(손절·익절·추적 손절)가 함께 적용됩니다.\n바꾸면 파라미터가 그 전략의 기본값으로 초기화됩니다.",
     short_window: "단기 이동평균 기간(캔들 수)입니다. 단기선이 장기선을 아래→위로 뚫는 캔들(골든크로스)에서 매수 신호, 위→아래(데드크로스)에서 매도 신호가 납니다.\n값을 줄이면 신호가 잦아지지만 잔파도에 자주 걸리고, 키우면 느리지만 큰 추세만 탑니다.",
     long_window: "장기 이동평균 기간(캔들 수)입니다. 단기선보다 커야 합니다.\n이 길이만큼 캔들이 쌓여야 첫 신호가 납니다(15분봉 200 = 약 50시간).",
     volume_window: "거래량 필터의 평균 기간(캔들 수)입니다. 0이면 거래량 필터를 끕니다.",
@@ -61,8 +61,10 @@
       const type = p.type || "number";
       const min = p.minimum ?? (p.exclusiveMinimum != null ? p.exclusiveMinimum : undefined);
       const max = p.maximum ?? (p.exclusiveMaximum != null ? p.exclusiveMaximum : undefined);
+      // label·help·depends_on: 전략 파라미터가 스키마에 실어 보내는 화면 정보 (없으면 필드 이름·HELP 사전을 쓴다)
       out.push({ name, type, nullable, min, max, step: type === "integer" ? 1 : "any",
-        desc: p.description || prop.description || "", default: prop.default });
+        desc: p.description || prop.description || "", default: prop.default,
+        label: prop.label || "", help: prop.help || "", dependsOn: prop.depends_on || null });
     }
     return out;
   }
@@ -81,7 +83,7 @@
         status: {}, balance: {}, perf: {}, recent: {}, latestSignal: null, logs: [], logLevel: "",
         logFilter: { ...recentWeek(), q: "" }, logsHasMore: false, logsLoading: false,
         logRangeAuto: true,  // 기간이 기본값(최근 7일)이면 자정이 지나도 오늘 기준으로 따라간다. 날짜를 직접 고르면 false
-        meta: { available: {}, schemas: {}, intervals: [], risk_schema: {} },
+        meta: { available: {}, schemas: {}, intervals: [], risk_schema: {}, catalog: [], families: {} },
         settingsVersion: 0, settingsHistory: [], form: null, saving: false, saveResult: null, formErrors: [],
         pockets: {}, transfer: { direction: "to_main", amount: 0, bot_pocket_uuid: null }, transferResult: null,
         showDust: false,
@@ -94,6 +96,7 @@
         // 백테스트 탭
         bt: { marketsText: "", interval: "", years: {}, recent: { 3: false, 6: false, 12: false }, custom: { enabled: false, start: "", end: "" },
           capital: 1000000, feePct: 0.05, slippagePct: 0.05, useRisk: false, submitting: false, error: null,
+          compare: {},  // 전략 이름 → 함께 돌려 비교할지 (현재 설정 전략은 항상 포함)
           job: null, jobs: [], selectedJobId: "", selected: null, timer: null },
         btDefaults: { years: [], today: "" },
         confirmLive: "", wsConnected: false, ws: null, toast: null, timers: [],
@@ -121,8 +124,16 @@
         return out;
       },
       btResult() { const j = this.bt.job; const r = j && this.bt.selected != null ? j.results[this.bt.selected] : null; return r && !r.error ? r : null; },
+      // 비교에 넣을 전략 (현재 설정 전략 제외, 목록에 있는 이름만)
+      btCompareList() {
+        if (!this.form) return [];
+        return Object.keys(this.bt.compare).filter((n) => this.bt.compare[n] && n !== this.form.strategy_name && n in this.meta.available);
+      },
+      btRunCount() { return this.btPeriods.length * this.btMarkets.length * (1 + this.btCompareList.length); },
+      btMulti() { const j = this.bt.job; return !!(j && j.request && (j.request.compare_strategies || []).length); },
+      btComparison() { const j = this.bt.job; return (j && j.comparison) || []; },
       btSummary() {
-        const j = this.bt.job; if (!j || !j.results.length) return "";
+        const j = this.bt.job; if (!j || !j.results.length || this.btMulti) return "";  // 여러 전략이면 비교표가 대신한다
         const ok = j.results.filter((r) => !r.error); if (!ok.length) return "";
         const avg = ok.reduce((a, r) => a + r.metrics.total_return, 0) / ok.length;
         const beat = ok.filter((r) => r.metrics.total_return > r.benchmark.total_return).length;
@@ -144,6 +155,19 @@
         });
       },
       paramFields() { return this.form ? schemaFields(this.meta.schemas[this.form.strategy_name]) : []; },
+      // 전략 드롭다운·비교 선택용: 계열별 묶음 (서버 카탈로그 순서)
+      strategyGroups() {
+        const catalog = this.meta.catalog || [];
+        const families = this.meta.families || {};
+        if (!catalog.length) {
+          return [{ family: "", label: "전략", items: Object.entries(this.meta.available || {}).map(([name, description]) => ({ name, description, rules: "" })) }];
+        }
+        const groups = Object.entries(families).map(([family, label]) => ({ family, label, items: catalog.filter((c) => c.family === family) }));
+        const rest = catalog.filter((c) => !(c.family in families));
+        if (rest.length) groups.push({ family: "", label: "기타", items: rest });
+        return groups.filter((g) => g.items.length);
+      },
+      strategyInfo() { return this.form ? this.catalogEntry(this.form.strategy_name) : null; },
       riskFields() {
         return schemaFields(this.meta.risk_schema).map((f) => PERCENT_FIELDS.has(f.name)
           ? Object.assign({}, f, { percent: true, min: 0, max: 100, step: 0.1, desc: "0~100" })
@@ -159,6 +183,12 @@
       fmtTime(iso) { if (!iso) return "-"; const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString("ko-KR", { hour12: false }); },
       riskLabel(name) { return RISK_LABELS[name] || name; },
       help(name) { return HELP[name] || ""; },
+      // 전략 파라미터: 스키마의 label/help 우선, 없으면(기존 전략) 필드 이름·HELP 사전
+      paramLabel(f) { return f.label || f.name; },
+      paramHelp(f) { return f.help || HELP[f.name] || ""; },
+      paramDisabled(f) { return !!(f.dependsOn && this.form && !this.form.strategy_params[f.dependsOn]); },
+      catalogEntry(name) { return (this.meta.catalog || []).find((c) => c.name === name) || null; },
+      familyLabel(name) { const c = this.catalogEntry(name); return c ? c.family_label : ""; },
       clampPercent(f) {
         // 비율 항목은 0~100 밖의 값을 받지 않는다 (입력 즉시 되돌림)
         if (!f.percent) return;
@@ -381,6 +411,17 @@
       removeBtMarket(code) { this.bt.marketsText = this.btMarkets.filter((m) => m !== code).join(","); },
       // ---------- 백테스트
       paramsSummary(params) { return Object.entries(params || {}).map(([k, v]) => `${k}=${v}`).join(", "); },
+      toggleCompare(name) { this.bt.compare = { ...this.bt.compare, [name]: !this.bt.compare[name] }; },
+      setCompare(on) {
+        const next = {};
+        if (on) for (const c of this.meta.catalog || []) next[c.name] = true;
+        this.bt.compare = next;
+      },
+      addCompareFamily(family) {
+        const next = { ...this.bt.compare };
+        for (const c of this.meta.catalog || []) if (c.family === family) next[c.name] = true;
+        this.bt.compare = next;
+      },
       btStatusLabel(s) { return { queued: "대기", running: "실행 중", done: "완료", error: "오류", cancelled: "중단" }[s] || s; },
       async loadBacktestDefaults() {
         try {
@@ -405,7 +446,7 @@
           try { risk = this.riskPayload(); } catch (e) { this.bt.error = e.message; this.notify("리스크 입력값을 확인하세요", "bad"); return; }
         }
         const body = { markets: this.btMarkets, candle_interval: this.bt.interval || this.form.candle_interval, strategy_name: this.form.strategy_name,
-          strategy_params: this.form.strategy_params, periods: this.btPeriods, initial_capital: this.bt.capital,
+          strategy_params: this.form.strategy_params, compare_strategies: this.btCompareList, periods: this.btPeriods, initial_capital: this.bt.capital,
           fee_rate: this.bt.feePct / 100, slippage_rate: this.bt.slippagePct / 100, use_risk: this.bt.useRisk, risk: this.bt.useRisk ? risk : null,
           settings_version: this.settingsVersion };
         this.bt.submitting = true; this.bt.error = null; this.bt.selected = null;

@@ -16,11 +16,19 @@ from app.strategy import (
     MovingAverageCrossStrategy,
     RSIStrategy,
     Strategy,
+    StrategyFamily,
     available_strategies,
     check_no_lookahead,
     create_strategy,
+    strategies_by_family,
+    strategy_catalog,
 )
 from app.strategy.base import ACTION_COLUMN, StrategyParams
+
+ALL_STRATEGIES = [
+    "ma_cross", "rsi", "bollinger", "macd", "ema_cross", "volume_breakout",
+    "adx_trend", "stochastic", "ichimoku", "obv", "cci", "williams_r",
+]
 
 
 def make_frame(close: list[float], volume: list[float] | None = None, start: datetime | None = None) -> pd.DataFrame:
@@ -47,11 +55,32 @@ def random_frame(n: int = 400, seed: int = 7) -> pd.DataFrame:
 
 class TestRegistry:
     def test_available_and_create(self) -> None:
-        assert set(available_strategies()) == {"ma_cross", "rsi"}
+        assert list(available_strategies()) == ALL_STRATEGIES  # 기존 2개 + 신규 10개, 드롭다운 순서
+        assert available_strategies()["ma_cross"] == "단기/장기 SMA 교차 + 거래량·RSI 필터"
+        assert available_strategies()["macd"] == "MACD Signal 교차"
         s = create_strategy("MA_CROSS", {"short_window": 5, "long_window": 10})
         assert isinstance(s, MovingAverageCrossStrategy)
         assert s.params.short_window == 5
         assert isinstance(create_strategy("rsi"), RSIStrategy)
+        for name in ALL_STRATEGIES:
+            assert create_strategy(name).name == name
+
+    def test_families(self) -> None:
+        by_family = {family: set(names) for family, names in strategies_by_family().items()}
+        assert by_family == {
+            StrategyFamily.TREND: {"ma_cross", "ema_cross", "macd", "ichimoku"},
+            StrategyFamily.MEAN_REVERSION: {"rsi", "bollinger", "stochastic", "cci", "williams_r"},
+            StrategyFamily.BREAKOUT: {"volume_breakout"},
+            StrategyFamily.FILTER: {"adx_trend", "obv"},
+        }
+        assert StrategyFamily.TREND.label == "추세 추종"
+
+    def test_catalog(self) -> None:
+        catalog = strategy_catalog()
+        assert [c["name"] for c in catalog] == ALL_STRATEGIES
+        ichimoku = next(c for c in catalog if c["name"] == "ichimoku")
+        assert ichimoku["family"] == "TREND" and ichimoku["warmup_periods"] == 79 and "구름" in ichimoku["rules"]
+        assert all(c["rules"] and c["family_label"] for c in catalog)
 
     def test_unknown_strategy(self) -> None:
         with pytest.raises(StrategyError, match="알 수 없는 전략"):
@@ -156,6 +185,53 @@ class TestRSIStrategy:
     def test_indicator_columns(self) -> None:
         signal = RSIStrategy().generate_signal(random_frame())
         assert list(signal.indicators) == ["rsi"]
+
+
+def golden_frame() -> pd.DataFrame:
+    rng = np.random.default_rng(11)
+    close = 100 * np.exp(np.cumsum(rng.normal(0, 0.02, 600)))
+    return make_frame(list(close), list(rng.uniform(1, 5, 600)))
+
+
+# 전략 확장 전 코드로 기록한 기존 전략의 출력 (신호 위치 B=BUY/S=SELL, 마지막 지표값, 워밍업, 백테스트 결과).
+# 신규 전략·공용 모듈을 고쳐도 기존 전략의 동작이 한 캔들도 바뀌지 않았는지 확인한다.
+GOLDEN = [
+    ("ma_cross", {}, "S199 S309 B327 S436 B473 S498 S535 B539 S543 B557 S572",
+     {"sma_short": 123.4535297544, "sma_long": 130.1807023835, "volume_ratio": 1.2064580457, "rsi": 45.7075815104},
+     61, 4, 962384.605249, 4302.06542),
+    ("ma_cross", {"long_window": 20, "short_window": 5},
+     "S24 B42 S46 B54 S69 S89 B90 S106 B113 S132 B138 S144 B158 S180 S185 B207 S225 B250 S273 S296 S308 S348 S370 "
+     "B371 S391 S423 B454 S485 S502 S529 B549 S565 S589",
+     {"sma_short": 120.2159240321, "sma_long": 123.4535297544, "volume_ratio": 1.2064580457, "rsi": 45.7075815104},
+     21, 11, 824788.802895, 10028.618614),
+    ("ma_cross", {"long_window": 20, "rsi_window": 0, "short_window": 5, "volume_window": 0},
+     "S24 B42 S46 B54 S69 B70 S89 B90 S106 B113 S132 B138 S144 B158 S180 B183 S185 B207 S225 B250 S273 B282 S296 "
+     "B307 S308 B315 S348 B358 S370 B371 S391 B400 S423 B454 S485 B501 S502 B511 S529 B549 S565 B584 S589",
+     {"sma_short": 120.2159240321, "sma_long": 123.4535297544}, 21, 21, 788333.146764, 19714.591776),
+    ("rsi", {}, "S21 S76 S166 B230 S257 S261 S263 S339 S343 S414 B570",
+     {"rsi": 45.7075815104}, 16, 2, 1056078.91732, 2145.903108),
+    ("rsi", {"overbought": 75, "oversold": 25, "window": 7},
+     "S9 B30 B33 S76 B150 S159 S166 B192 B197 B231 S253 S263 S326 S343 S382 S415 B428 S561 B571 B593",
+     {"rsi": 50.4748266592}, 9, 5, 1112300.449326, 5771.004645),
+]
+
+
+class TestExistingStrategiesRegression:
+    @pytest.mark.parametrize(("name", "params", "signals", "last", "warmup", "trades", "equity", "fees"), GOLDEN)
+    def test_matches_recorded_behaviour(self, name, params, signals, last, warmup, trades, equity, fees) -> None:
+        from app.backtest import BacktestConfig, BacktestEngine
+
+        df = golden_frame()
+        s = create_strategy(name, params)
+        result = s.evaluate(df)
+        got = " ".join(f"{a[0]}{i}" for i, a in enumerate(result[ACTION_COLUMN]) if a != "HOLD")
+        assert got == signals
+        assert s.warmup_periods == warmup
+        assert {k: round(v, 10) for k, v in s.generate_signal(df).indicators.items()} == last
+        bt = BacktestEngine(BacktestConfig()).run(df, s, market="KRW-TEST", interval="60m")
+        assert bt.metrics.total_trades == trades
+        assert bt.metrics.final_equity == pytest.approx(equity, abs=1e-5)
+        assert bt.metrics.total_fees == pytest.approx(fees, abs=1e-5)
 
 
 class TestCommon:

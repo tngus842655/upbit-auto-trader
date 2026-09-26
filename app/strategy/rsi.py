@@ -12,7 +12,7 @@ from typing import ClassVar
 import pandas as pd
 from pydantic import Field, model_validator
 
-from app.strategy.base import ACTION_COLUMN, REASON_COLUMN, Action, Strategy, StrategyParams, reasons
+from app.strategy.base import ACTION_COLUMN, REASON_COLUMN, Action, Strategy, StrategyFamily, StrategyParams, reasons
 from app.strategy.indicators import rsi
 
 
@@ -31,6 +31,11 @@ class RSIParams(StrategyParams):
 class RSIStrategy(Strategy):
     name: ClassVar[str] = "rsi"
     description: ClassVar[str] = "RSI 과매도 탈출 매수 / 과매수 이탈 매도"
+    family: ClassVar[StrategyFamily] = StrategyFamily.MEAN_REVERSION
+    rules: ClassVar[str] = (
+        "매수: RSI 가 과매도선 아래에서 위로 회복 (과매도 탈출)\n"
+        "매도: RSI 가 과매수선 위에서 아래로 내려옴 (과매수 이탈)"
+    )
     Params: ClassVar[type[StrategyParams]] = RSIParams
     params: RSIParams
 

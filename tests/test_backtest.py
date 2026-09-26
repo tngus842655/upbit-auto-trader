@@ -134,6 +134,8 @@ class TestEngineFills:
         assert (result.equity == 1_000_000).all()
         assert result.metrics.total_return == 0.0
         assert math.isnan(result.metrics.win_rate)
+        assert math.isnan(result.metrics.avg_trade_return) and result.metrics.realized_pnl == 0.0
+        assert result.metrics.to_dict()["avg_trade_return"] is None  # JSON 에는 null
         assert result.metrics.mdd == 0.0
         assert result.benchmark_metrics.total_trades == 1
 
@@ -292,6 +294,8 @@ class TestMetrics:
         assert m.avg_win == pytest.approx(15) and m.avg_loss == pytest.approx(-11 / 3)
         assert m.profit_factor == pytest.approx(30 / 11)
         assert m.expectancy == pytest.approx(19 / 5)
+        assert m.realized_pnl == pytest.approx(19)  # 10 − 5 − 5 + 20 − 1
+        assert m.avg_trade_return == pytest.approx((0.1 - 0.05 - 0.05 + 0.2 - 0.01) / 5)
         assert m.total_return == pytest.approx(0.2)
         assert m.total_fees == 0.5
         assert m.duration_days == pytest.approx(4 / 24)

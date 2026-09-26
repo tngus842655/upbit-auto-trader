@@ -115,9 +115,23 @@ table.markets td:last-child .pill { white-space: nowrap; margin: 1px 2px 1px 0; 
 .progress span { position: relative; display: block; text-align: center; font-size: 12px; line-height: 22px; }
 table.bt tr { cursor: pointer; }
 table.bt tr.sel td { background: rgba(79, 140, 255, 0.12); }
-.kpis.bt { margin-bottom: 10px; }
+.kpis.bt { margin-bottom: 10px; grid-template-columns: repeat(4, 1fr); }
 label.inline { display: inline-flex; align-items: center; gap: 4px; }
 .note.small { font-size: 12px; }
+/* 여러 전략 결과는 행이 많다 → 표 안에서 스크롤 */
+.bt-scroll { max-height: 440px; overflow-y: auto; }
+.bt-scroll thead th { position: sticky; top: 0; background: var(--panel); z-index: 1; }
+@media (max-width: 1100px) { .kpis.bt { grid-template-columns: repeat(2, 1fr); } }
+
+/* ---------- 전략 선택 · 비교 ---------- */
+.card select { max-width: 100%; }  /* '이전 결과 보기' 같은 긴 선택지가 카드를 옆으로 밀지 않게 */
+h4 .muted { text-transform: none; letter-spacing: normal; }
+.note.rules .pre { white-space: pre-line; margin-top: 4px; line-height: 1.55; }
+.field.off > span { opacity: .55; }
+code.pname { font-size: 11px; color: #6b7386; }
+.compare-groups { display: flex; flex-direction: column; gap: 4px; padding: 6px 8px; background: var(--panel2); border-radius: 6px; }
+.compare-groups a.fam { min-width: 150px; color: var(--muted); cursor: pointer; text-decoration: none; }
+.compare-groups a.fam:hover { color: var(--accent); }
 
 /* ---------- 설정 이력 ---------- */
 td.nowrap { white-space: nowrap; }

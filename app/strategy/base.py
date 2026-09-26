@@ -8,6 +8,8 @@
   ``check_no_lookahead()`` 가 이를 검증한다 (Look-ahead Bias 자동 검사).
 - ``generate_signal(df)`` 는 마지막 닫힌 캔들에 대한 ``Signal`` 하나를 돌려준다.
 - 포지션 보유 여부는 전략이 아니라 주문·리스크 계층이 판단한다. 전략은 "지금 조건이 매수/매도 조건인가" 만 답한다.
+- 전략은 계열(``StrategyFamily``: 추세·평균회귀·돌파·필터)을 밝힌다. 지금은 표시·비교용이며, 나중에 시장 상태에 따라
+  계열을 고르는 Strategy Router 가 이 값으로 후보를 고른다.
 - 어떤 전략도 수익을 보장하지 않는다. 수익성은 백테스트(Phase 4)·모의매매(Phase 5)로만 검증한다.
 """
 
@@ -24,7 +26,7 @@ from typing import Any, ClassVar
 
 import numpy as np
 import pandas as pd
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.core.exceptions import MarketDataError, StrategyError
 from app.strategy.data import CANDLE_COLUMNS
@@ -34,6 +36,27 @@ class Action(StrEnum):
     BUY = "BUY"
     SELL = "SELL"
     HOLD = "HOLD"
+
+
+class StrategyFamily(StrEnum):
+    """전략 계열. 대시보드 묶음 표시·성과 비교에 쓰고, 향후 Strategy Router 가 계열 단위로 전략을 고른다."""
+
+    TREND = "TREND"  # 추세 추종: 이미 난 추세에 올라탄다
+    MEAN_REVERSION = "MEAN_REVERSION"  # 평균 회귀: 과매도 반등·과매수 하락을 노린다
+    BREAKOUT = "BREAKOUT"  # 돌파: 박스권 상단을 거래량과 함께 뚫을 때 들어간다
+    FILTER = "FILTER"  # 필터: 추세 강도(ADX)·거래량 흐름(OBV)으로 방향을 확인한다
+
+    @property
+    def label(self) -> str:
+        return _FAMILY_LABELS[self]
+
+
+_FAMILY_LABELS = {
+    StrategyFamily.TREND: "추세 추종",
+    StrategyFamily.MEAN_REVERSION: "평균 회귀",
+    StrategyFamily.BREAKOUT: "돌파",
+    StrategyFamily.FILTER: "필터 (추세 강도·거래량)",
+}
 
 
 ACTION_COLUMN = "action"
@@ -78,16 +101,42 @@ class StrategyParams(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
 
+def param(
+    default: Any,
+    *,
+    label: str,
+    description: str | None = None,
+    help_text: str | None = None,
+    depends_on: str | None = None,
+    **constraints: Any,
+) -> Any:
+    """화면 정보가 붙은 파라미터 필드. 대시보드 설정 폼은 JSON 스키마로 자동 생성되므로 여기 적은 값이 그대로 보인다.
+
+    - ``label``: 폼에 보일 이름 (없으면 필드 이름)
+    - ``description``: 입력칸 옆 짧은 설명, ``help_text``: ? 아이콘 툴팁
+    - ``depends_on``: 이 불리언 필드가 꺼져 있으면 폼에서 입력칸을 비활성화한다 (값은 무시됨)
+    """
+    extra: dict[str, Any] = {"label": label}
+    if help_text:
+        extra["help"] = help_text
+    if depends_on:
+        extra["depends_on"] = depends_on
+    return Field(default=default, description=description, json_schema_extra=extra, **constraints)
+
+
 class Strategy(ABC):
     """전략 기본 클래스.
 
     하위 클래스는 ``name``, ``Params``, ``warmup_periods``, ``evaluate()`` 를 구현한다.
     ``evaluate()`` 가 돌려주는 DataFrame 은 입력과 같은 index 를 가지며 최소한
     ``action``(BUY/SELL/HOLD 문자열), ``reason`` 열과 지표 열들을 포함한다.
+    ``family`` 는 전략 계열, ``rules`` 는 화면에 보여 줄 매수·매도 규칙 요약이다 (동작에는 영향 없음).
     """
 
     name: ClassVar[str] = "base"
     description: ClassVar[str] = ""
+    family: ClassVar[StrategyFamily | None] = None
+    rules: ClassVar[str] = ""
     Params: ClassVar[type[StrategyParams]] = StrategyParams
 
     def __init__(self, params: Mapping[str, Any] | StrategyParams | None = None) -> None:
@@ -187,6 +236,19 @@ def reasons(default: str, *cases: tuple[pd.Series, str]) -> pd.Series:
     texts = [t for _, t in cases]
     out = np.select(conds, texts, default=default)
     return pd.Series(out, index=cases[0][0].index, dtype="object")
+
+
+def warmup_mask(df: pd.DataFrame, warmup_periods: int) -> pd.Series:
+    """워밍업 구간(앞쪽 ``warmup_periods - 1`` 개 캔들) 표시. 이 구간에서는 신호를 내지 않는다."""
+    return pd.Series(np.arange(len(df)) < warmup_periods - 1, index=df.index)
+
+
+def action_series(buy: pd.Series, sell: pd.Series) -> pd.Series:
+    """BUY/SELL 불리언 열 → ``action`` 문자열 열. 둘 다 참이면 SELL (기존 전략과 같은 우선순위)."""
+    actions = pd.Series(Action.HOLD.value, index=buy.index, dtype="object")
+    actions[buy.fillna(False).astype(bool)] = Action.BUY.value
+    actions[sell.fillna(False).astype(bool)] = Action.SELL.value
+    return actions
 
 
 def check_no_lookahead(

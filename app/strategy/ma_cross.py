@@ -16,7 +16,7 @@ from typing import ClassVar
 import pandas as pd
 from pydantic import Field, model_validator
 
-from app.strategy.base import ACTION_COLUMN, REASON_COLUMN, Action, Strategy, StrategyParams, reasons
+from app.strategy.base import ACTION_COLUMN, REASON_COLUMN, Action, Strategy, StrategyFamily, StrategyParams, reasons
 from app.strategy.indicators import cross_above, cross_below, rsi, sma
 
 
@@ -38,6 +38,11 @@ class MovingAverageCrossParams(StrategyParams):
 class MovingAverageCrossStrategy(Strategy):
     name: ClassVar[str] = "ma_cross"
     description: ClassVar[str] = "단기/장기 SMA 교차 + 거래량·RSI 필터"
+    family: ClassVar[StrategyFamily] = StrategyFamily.TREND
+    rules: ClassVar[str] = (
+        "매수: 단기 SMA 가 장기 SMA 를 상향 돌파 (골든크로스) — 거래량·RSI 필터를 통과할 때만\n"
+        "매도: 단기 SMA 가 장기 SMA 를 하향 돌파 (데드크로스)"
+    )
     Params: ClassVar[type[StrategyParams]] = MovingAverageCrossParams
     params: MovingAverageCrossParams
 
