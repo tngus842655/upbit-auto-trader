@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from app.api.backtests import BacktestRequest, BacktestRunner
+from app.api.optimizer import OptimizeRequest, OptimizeRunner
 from app.api.process import engine_is_alive, is_engine_process, kill_engine, process_cmdline, start_engine
 from app.api.services import DashboardService, describe_api_error
 from app.config.settings import Settings, TradingMode, get_settings
@@ -50,13 +51,14 @@ INTERVALS = [i.value for i in CandleInterval if i.value not in ("1s", "1w", "1M"
 
 def create_app(settings: Settings | None = None, *, db: Database | None = None,
                public_client: UpbitClient | None = None, service: DashboardService | None = None,
-               backtests: BacktestRunner | None = None) -> FastAPI:
+               backtests: BacktestRunner | None = None, optimizer: OptimizeRunner | None = None) -> FastAPI:
     settings = settings or get_settings()
     db = db or Database(settings.database_url)
     db.create_all()
     public_client = public_client or UpbitClient(base_url=settings.upbit_api_url, timeout=settings.http_timeout_seconds)
     service = service or DashboardService(settings, db, public_client)
     backtests = backtests or BacktestRunner(settings, repo=service.repo("paper"))
+    optimizer = optimizer or OptimizeRunner(settings)
 
     app = FastAPI(title="upbit-auto-trader 대시보드", version="0.8")
 
@@ -117,6 +119,7 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
     app.state.db = db
     app.state.service = service
     app.state.backtests = backtests
+    app.state.optimizer = optimizer
 
     def mode_param(mode: str = Query("paper", pattern="^(paper|live)$")) -> str:
         return mode
@@ -237,6 +240,30 @@ def create_app(settings: Settings | None = None, *, db: Database | None = None,
         if not await backtests.delete(job_id):
             raise HTTPException(status_code=404, detail="백테스트 작업을 찾을 수 없습니다")
         return {"deleted": True, "id": job_id}
+
+    # ------------------------------------------------------------------ 연도별 최적 설정 (백테스트 기반, 저장 안 함)
+    @app.post("/api/optimize")
+    async def api_optimize_submit(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        """전략·연도·마켓으로 조합을 모두 백테스트해 그 해 수익률이 가장 높은 설정을 찾는다 (백그라운드)."""
+        try:
+            request = OptimizeRequest(**payload)
+        except ValidationError as exc:
+            errors = [{"field": ".".join(str(p) for p in e["loc"]), "message": e["msg"]} for e in exc.errors()]
+            raise HTTPException(status_code=422, detail=errors) from exc
+        return optimizer.submit(request).to_dict()
+
+    @app.get("/api/optimize/{job_id}")
+    async def api_optimize_job(job_id: str) -> dict[str, Any]:
+        job = optimizer.get(job_id)
+        if job is None:
+            raise HTTPException(status_code=404, detail="최적화 작업을 찾을 수 없습니다")
+        return job.to_dict()
+
+    @app.post("/api/optimize/{job_id}/cancel")
+    async def api_optimize_cancel(job_id: str) -> dict[str, Any]:
+        if not await optimizer.cancel(job_id):
+            raise HTTPException(status_code=404, detail="실행 중인 최적화 작업이 아닙니다")
+        return {"cancelled": True, "id": job_id}
 
     # ------------------------------------------------------------------ 전략 · 설정
     def _current_runtime(mode: str) -> tuple[RuntimeSettings, int]:

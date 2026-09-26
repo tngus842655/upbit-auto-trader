@@ -211,11 +211,8 @@
               <span v-if="!selectedMarkets.length" class="muted small">선택된 마켓이 없습니다</span>
             </div>
           </div>
-          <label class="field"><span>캔들 단위 <i class="help" tabindex="0" :data-tip="help('candle_interval')">?</i> <em>재시작 필요</em></span>
-            <select v-model="form.candle_interval"><option v-for="i in meta.intervals" :key="i" :value="i">{{ i }}</option></select>
-          </label>
           <label class="field"><span>전략 <i class="help" tabindex="0" :data-tip="help('strategy_name')">?</i></span>
-            <select v-model="form.strategy_name" @change="resetParams">
+            <select v-model="form.strategy_name" @change="resetParams" :disabled="opt.running">
               <optgroup v-for="g in strategyGroups" :key="g.family || 'all'" :label="g.label">
                 <option v-for="s in g.items" :key="s.name" :value="s.name">{{ s.name }} — {{ s.description }}</option>
               </optgroup>
@@ -226,6 +223,28 @@
             <span class="muted">기본 파라미터면 캔들 {{ strategyInfo.warmup_periods }}개가 쌓여야 첫 신호가 납니다</span>
             <div class="pre">{{ strategyInfo.rules }}</div>
           </div>
+          <div class="field"><span>연도별 최적 설정 <i class="help" tabindex="0" :data-tip="help('optimize')">?</i> <em>그 해 백테스트 수익률이 가장 높았던 캔들 단위·파라미터·손절/익절을 폼에 채웁니다</em></span>
+            <div class="row wrap">
+              <button v-for="y in optimizeYears" :key="y" type="button" class="small" :class="{ primary: opt.result && opt.result.year === y && !opt.running }"
+                :disabled="opt.running || !selectedMarkets.length" @click="optimizeYear(y)" :title="y + '년 캔들로 ' + form.strategy_name + ' 조합을 모두 백테스트합니다'">{{ y }}년</button>
+              <button v-if="opt.running" type="button" class="small danger" @click="cancelOptimize">중단</button>
+            </div>
+            <div v-if="opt.running" class="progress"><div class="bar" :style="{ width: optProgressPct + '%' }"></div><span>{{ opt.year }}년 · {{ optPhaseLabel }} {{ opt.progress }} / {{ opt.total }}</span></div>
+            <div v-if="opt.error" class="errors">{{ opt.error }}</div>
+            <div v-if="opt.result" class="note small optimize-result" :class="{ warnnote: !opt.result.best.beats_benchmark }">
+              <div><b>{{ opt.result.year }}년 최적 ({{ opt.result.strategy }})</b> <span class="muted">{{ opt.result.markets.join(', ') }} 평균 · 조합 {{ opt.result.evaluated }}개 중 1위{{ opt.cached ? ' · 저장된 결과' : '' }}</span></div>
+              <div>수익률 <b :class="sign(opt.result.best.avg_return)">{{ pct(opt.result.best.avg_return) }}</b> · 단순 보유 {{ pct(opt.result.best.avg_benchmark) }}
+                <b v-if="!opt.result.best.beats_benchmark" class="warn"> — 어떤 조합도 단순 보유보다 낮아 그중 가장 높은 값을 골랐습니다</b></div>
+              <div class="muted">캔들 {{ opt.result.best.interval }} · {{ opt.result.best.exit.label }} · 거래 {{ opt.result.best.trades }}회 · 평균 MDD {{ pct(opt.result.best.avg_mdd) }}</div>
+              <div class="muted">{{ paramText(opt.result.strategy, opt.result.best.params) }}</div>
+              <div v-if="opt.result.next_year">같은 설정으로 다음 해({{ opt.result.next_year.year }}년{{ opt.result.next_year.partial ? ' 1/1~오늘 0시' : '' }}): <b :class="sign(opt.result.next_year.avg_return)">{{ pct(opt.result.next_year.avg_return) }}</b> · 단순 보유 {{ pct(opt.result.next_year.avg_benchmark) }}</div>
+              <div v-if="opt.result.skipped && opt.result.skipped.length" class="muted">제외된 마켓: {{ opt.result.skipped.map((s) => s.market).join(', ') }} (그 해 캔들 없음)</div>
+              <div class="muted">{{ opt.applied ? '폼에 채웠습니다 — 저장을 눌러야 봇에 적용됩니다. 백테스트 탭의 ‘리스크 규칙’도 켜 두었습니다 (이 수익률은 손절·익절이 들어간 값이라 끄고 돌리면 다르게 나옵니다).' : '폼의 전략·모드가 바뀌어 채우지 않았습니다.' }} 수수료 {{ (opt.result.fee_rate * 100).toFixed(3) }}%·슬리피지 {{ (opt.result.slippage_rate * 100).toFixed(3) }}% 반영. 지난 한 해에 가장 좋았던 값일 뿐 앞으로도 좋다는 보장은 없습니다.</div>
+            </div>
+          </div>
+          <label class="field"><span>캔들 단위 <i class="help" tabindex="0" :data-tip="help('candle_interval')">?</i> <em>재시작 필요</em></span>
+            <select v-model="form.candle_interval"><option v-for="i in meta.intervals" :key="i" :value="i">{{ i }}</option></select>
+          </label>
           <h4>전략 파라미터 <span class="muted small" v-if="strategyInfo">{{ form.strategy_name }} 전용</span></h4>
           <div class="fields">
             <div class="field" v-for="f in paramFields" :key="f.name" :class="{ off: paramDisabled(f) }">
@@ -333,6 +352,7 @@
             <label class="field"><span>슬리피지 (%) <em>시장가 체결 손실 가정</em></span><input type="number" min="0" max="5" step="0.01" v-model.number="bt.slippagePct"></label>
             <label class="field"><span>리스크 규칙</span>
               <span class="row"><input type="checkbox" v-model="bt.useRisk"> <span class="small muted">현재 설정의 손절·익절·추적 손절·일일/연속 손실 한도 적용</span></span>
+              <span v-if="!bt.useRisk && formExitText" class="hint-warn">꺼져 있어서 지금 설정의 {{ formExitText }}가 빠진 결과가 나옵니다</span>
             </label>
           </div>
           <div class="actions wrap">
@@ -351,7 +371,7 @@
       </div>
 
       <div class="card">
-        <h3>결과 <span class="muted small" v-if="bt.job">{{ bt.job.label }} · 수수료 {{ (bt.job.request.fee_rate * 100).toFixed(3) }}% · 슬리피지 {{ (bt.job.request.slippage_rate * 100).toFixed(3) }}%{{ bt.job.request.use_risk ? ' · 리스크 적용' : '' }}</span></h3>
+        <h3>결과 <span class="muted small" v-if="bt.job">{{ bt.job.label }} · 수수료 {{ (bt.job.request.fee_rate * 100).toFixed(3) }}% · 슬리피지 {{ (bt.job.request.slippage_rate * 100).toFixed(3) }}%{{ bt.job.request.use_risk ? ' · 리스크 적용' : ' · 리스크 규칙 없음 (손절·익절 미적용)' }}</span></h3>
         <div v-if="!bt.job" class="muted">아직 실행한 백테스트가 없습니다. 왼쪽에서 기간을 고르고 실행하세요.</div>
         <template v-else>
           <div class="muted small" v-if="btSummary">{{ btSummary }}</div>

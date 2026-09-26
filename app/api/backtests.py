@@ -47,6 +47,7 @@ DASHBOARD_CANDLE_RULES = {
 }
 DASHBOARD_RATE_LIMITER = RateLimiter(rules={**RATE_LIMIT_RULES, **DASHBOARD_CANDLE_RULES}, safety_margin=0)
 KEEP_JOBS = 100  # DB 에 남기는 최근 작업 수
+YEAR_CHOICES = 6  # 기간 연도 체크박스: 올해 + 지난 5년 (설정 탭 '연도별 최적 설정' 버튼과 같은 범위)
 MAX_EQUITY_POINTS = 300
 MAX_TRADES = 60
 
@@ -293,7 +294,7 @@ class BacktestRunner:
             "initial_capital": self.settings.paper_initial_cash,
             "fee_rate": self.settings.paper_fee_rate,
             "slippage_rate": self.settings.paper_slippage_rate,
-            "years": list(range(now.year, now.year - 4, -1)),
+            "years": list(range(now.year, now.year - YEAR_CHOICES, -1)),
             "today": now.date().isoformat(),
             "intervals": [i.value for i in CandleInterval if i.value not in ("1s", "1w", "1M", "1y")],
         }

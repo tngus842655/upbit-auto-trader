@@ -138,7 +138,8 @@ def test_backtest_api_flow(make_settings, tmp_path) -> None:
     app = create_app(settings, db=db, public_client=FakePublicClient({}), backtests=runner)
     with TestClient(app) as client:
         defaults = client.get("/api/backtest/defaults").json()
-        assert defaults["fee_rate"] == 0.0007 and datetime.now(KST).year in defaults["years"]
+        this_year = datetime.now(KST).year
+        assert defaults["fee_rate"] == 0.0007 and defaults["years"] == list(range(this_year, this_year - 6, -1))
         assert "60m" in defaults["intervals"]
 
         bad_body = {"markets": ["KRW-BTC"], "strategy_name": "ma_cross", "periods": []}

@@ -25,6 +25,7 @@
     markets: "봇이 거래할 원화 마켓 목록입니다. 여기 없는 코인은 보지도, 팔지도 않습니다.\n바꾸면 엔진 재시작(정지 → 시작)이 필요합니다.",
     candle_interval: "전략이 판단하는 캔들 길이입니다. 캔들이 닫힐 때마다 한 번 판단하므로 짧을수록 신호와 거래가 잦고 수수료 부담이 커집니다.\n주·월·연 캔들은 엔진에서 쓸 수 없습니다. 바꾸면 엔진 재시작이 필요합니다.",
     strategy_name: "신호를 만드는 규칙입니다. 추세 추종 · 평균 회귀 · 돌파 · 필터 계열로 묶여 있고, 고르면 아래에 매수·매도 규칙이 보입니다.\n모든 전략의 청산에는 리스크 관리(손절·익절·추적 손절)가 함께 적용됩니다.\n바꾸면 파라미터가 그 전략의 기본값으로 초기화됩니다.",
+    optimize: "고른 해(1월 1일~12월 31일)의 실제 캔들로 캔들 단위(60분·240분·일봉) × 이 전략의 파라미터 후보 × 손절·익절·추적 손절 8가지를 모두 백테스트해, 선택한 마켓 평균 수익률이 가장 높은 조합을 폼에 채웁니다.\n단순 보유보다 나은 조합이 없으면 그중 가장 높은 조합을 고릅니다. 수수료·슬리피지·초기 자본은 백테스트 탭 값, 나머지 리스크(현금 비율·일일 손실 한도 등)는 지금 폼 값을 씁니다. 결과를 채울 때 백테스트 탭의 '리스크 규칙'도 켜 두므로 같은 해를 돌리면 같은 수익률이 나옵니다(끄면 손절·익절이 빠져 다르게 나옵니다).\n폼에만 채우므로 저장을 눌러야 봇에 적용됩니다. 처음 누른 해는 캔들을 받느라 1~2분 걸릴 수 있고, 같은 조건으로 다시 누르면 저장된 결과가 바로 나옵니다.\n지난 한 해에 가장 좋았던 값일 뿐 앞으로도 좋다는 보장은 없습니다 — 결과의 '다음 해' 성과를 함께 보세요.",
     short_window: "단기 이동평균 기간(캔들 수)입니다. 단기선이 장기선을 아래→위로 뚫는 캔들(골든크로스)에서 매수 신호, 위→아래(데드크로스)에서 매도 신호가 납니다.\n값을 줄이면 신호가 잦아지지만 잔파도에 자주 걸리고, 키우면 느리지만 큰 추세만 탑니다.",
     long_window: "장기 이동평균 기간(캔들 수)입니다. 단기선보다 커야 합니다.\n이 길이만큼 캔들이 쌓여야 첫 신호가 납니다(15분봉 200 = 약 50시간).",
     volume_window: "거래량 필터의 평균 기간(캔들 수)입니다. 0이면 거래량 필터를 끕니다.",
@@ -98,6 +99,9 @@
           capital: 1000000, feePct: 0.05, slippagePct: 0.05, useRisk: false, submitting: false, error: null,
           job: null, jobs: [], selectedJobId: "", selected: null, timer: null },
         btDefaults: { years: [], today: "" },
+        // 설정 탭 '연도별 최적 설정' (요청 당시 전략·모드를 기억했다가, 끝났을 때 그대로면 폼에 채운다)
+        opt: { year: null, jobId: null, running: false, status: "", phase: "", progress: 0, total: 0, result: null, error: null,
+          cached: false, applied: false, strategy: null, mode: null, timer: null },
         confirmLive: "", wsConnected: false, ws: null, toast: null, timers: [],
       };
     },
@@ -161,6 +165,17 @@
         return groups.filter((g) => g.items.length);
       },
       strategyInfo() { return this.form ? this.catalogEntry(this.form.strategy_name) : null; },
+      optimizeYears() { return [1, 2, 3, 4, 5].map((i) => this.currentYear - i); },  // 올해를 뺀 최근 5년
+      // 설정 폼에 켜져 있는 청산 규칙 (예: "손절 5% · 익절 10%") — 백테스트 탭에서 리스크 규칙을 끈 채 돌리면 빠지는 값
+      formExitText() {
+        if (!this.form) return "";
+        const names = { stop_loss_pct: "손절", take_profit_pct: "익절", trailing_stop_pct: "추적 손절" };
+        return Object.entries(names)
+          .filter(([key]) => this.form.riskEnabled[key] && this.form.risk[key] != null && this.form.risk[key] !== "")
+          .map(([key, label]) => `${label} ${this.form.risk[key]}%`).join(" · ");
+      },
+      optProgressPct() { return this.opt.total ? Math.round((this.opt.progress / this.opt.total) * 100) : 0; },
+      optPhaseLabel() { return { candles: "캔들 준비", backtest: "조합 백테스트", verify: "다음 해 확인" }[this.opt.phase] || "대기"; },
       riskFields() {
         return schemaFields(this.meta.risk_schema).map((f) => PERCENT_FIELDS.has(f.name)
           ? Object.assign({}, f, { percent: true, min: 0, max: 100, step: 0.1, desc: "0~100" })
@@ -240,7 +255,10 @@
       commandLabel(v) { return { pause: "일시정지", resume: "재개", stop: "정지", halt: "긴급 정지", resume_risk: "긴급 정지 해제", reload: "설정 다시 읽기", kill: "강제 종료" }[v] || v; },
       saveToken() { localStorage.setItem("token", this.token); this.connectWs(); },
       // 설정·로그는 모드마다 따로 저장되므로 모드를 바꾸면 바로 다시 불러온다 (새로고침 전까지 이전 모드 설정이 남던 문제)
-      switchMode() { localStorage.setItem("mode", this.mode); this.loadAll(); this.connectWs(); this.loadSettings(); this.loadLogs(); },
+      switchMode() {
+        localStorage.setItem("mode", this.mode); this.opt.result = null; this.opt.error = null;
+        this.loadAll(); this.connectWs(); this.loadSettings(); this.loadLogs();
+      },
       // opts.mode: 화면 모드가 아닌 다른 모드를 읽을 때 (예: 실거래 화면에서 모의매매 설정 가져오기)
       async api(path, opts) {
         const { mode, ...rest } = opts || {};
@@ -328,6 +346,56 @@
         const params = {};
         for (const f of schemaFields(this.meta.schemas[this.form.strategy_name])) params[f.name] = f.default;
         this.form.strategy_params = params;
+        this.opt.result = null; this.opt.error = null;  // 다른 전략의 최적화 결과는 내린다
+      },
+      // ---------- 연도별 최적 설정 (백테스트로 찾고 폼에만 채운다 — 저장은 사용자가)
+      async optimizeYear(year) {
+        if (!this.form || this.opt.running) return;
+        let risk;
+        try { risk = this.riskPayload(); } catch (e) { this.opt.error = "리스크 입력값을 먼저 고치세요: " + e.message; return; }
+        const body = { strategy_name: this.form.strategy_name, year, markets: this.selectedMarkets, risk,
+          initial_capital: this.bt.capital, fee_rate: this.bt.feePct / 100, slippage_rate: this.bt.slippagePct / 100 };
+        Object.assign(this.opt, { year, running: true, status: "queued", phase: "", progress: 0, total: 0, result: null, error: null,
+          cached: false, applied: false, strategy: this.form.strategy_name, mode: this.mode });
+        try {
+          const job = await this.api("/api/optimize", { method: "POST", body });
+          this.opt.jobId = job.id;
+          this.handleOptimizeJob(job);
+        } catch (e) { this.opt.running = false; this.opt.error = "최적화 시작 실패: " + e.message; }
+      },
+      handleOptimizeJob(job) {
+        Object.assign(this.opt, { status: job.status, phase: job.phase, progress: job.progress, total: job.total });
+        if (job.status === "queued" || job.status === "running") { this.opt.timer = setTimeout(() => this.pollOptimize(job.id), 800); return; }
+        this.opt.running = false;
+        if (job.status === "done") { this.opt.result = job.result; this.opt.cached = job.cached; this.applyOptimization(job.result); }
+        else if (job.status === "error") this.opt.error = job.error || "최적화 실패";
+        else this.notify("최적화를 중단했습니다", "info");
+      },
+      async pollOptimize(id) {
+        if (this.opt.jobId !== id) return;
+        try { this.handleOptimizeJob(await this.api(`/api/optimize/${id}`)); }
+        catch (e) { this.opt.running = false; this.opt.error = "진행 조회 실패: " + e.message; }
+      },
+      async cancelOptimize() {
+        if (!this.opt.jobId) return;
+        try { await this.api(`/api/optimize/${this.opt.jobId}/cancel`, { method: "POST", body: {} }); } catch (e) { /* 이미 끝났으면 무시 */ }
+      },
+      applyOptimization(result) {
+        // 요청 뒤에 전략이나 모드가 바뀌었으면 다른 설정 위에 덮어쓰지 않는다
+        if (!this.form || this.form.strategy_name !== result.strategy || this.mode !== this.opt.mode) { this.opt.applied = false; return; }
+        const best = result.best;
+        this.form.candle_interval = best.interval;
+        this.form.strategy_params = Object.assign({}, best.params);
+        for (const key of ["stop_loss_pct", "take_profit_pct", "trailing_stop_pct"]) {
+          const v = best.exit[key];
+          this.form.riskEnabled[key] = v != null;
+          if (v != null) this.form.risk[key] = toPercent(v);
+        }
+        this.form.note = `${result.year}년 최적 설정 (백테스트 ${this.pct(best.avg_return)}, 단순 보유 ${this.pct(best.avg_benchmark)})`;
+        // 최적 수익률은 손절·익절이 들어간 값이다 — 백테스트 탭에서 같은 해를 돌렸을 때 같은 숫자가 나오도록 리스크 규칙을 켠다
+        this.bt.useRisk = true;
+        this.opt.applied = true;
+        this.notify(`${result.year}년 최적 설정을 폼에 채웠습니다. 저장을 눌러야 적용됩니다`, "ok");
       },
       async saveSettings() {
         if (!this.form) return;

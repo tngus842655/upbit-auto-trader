@@ -126,6 +126,9 @@ h4 .muted { text-transform: none; letter-spacing: normal; }
 .note.rules .pre { white-space: pre-line; margin-top: 4px; line-height: 1.55; }
 .field.off > span { opacity: .55; }
 code.pname { font-size: 11px; color: #6b7386; }
+.hint-warn { color: var(--warn); font-size: 12px; }
+/* 연도별 최적 설정 결과 */
+.optimize-result { display: flex; flex-direction: column; gap: 3px; margin-top: 6px; }
 /* 결과 상세의 파라미터 한 줄 */
 .param-line { white-space: normal; font-size: 11.5px; color: var(--muted); line-height: 1.4; }
 .mb { margin-bottom: 8px; }
