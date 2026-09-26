@@ -294,7 +294,7 @@
     <section class="grid two">
       <div class="card">
         <h3>백테스트 설정 <span class="muted small">실제 주문 없음 · 과거 캔들로 시뮬레이션</span></h3>
-        <p class="muted small">현재 실행 설정 <b>v{{ settingsVersion }}</b>의 전략·파라미터를 그대로 씁니다. 설정 탭에서 바꿔 저장하면 여기에도 반영됩니다. 마켓·캔들 단위·기간·수수료는 여기서 따로 정할 수 있고 실행 설정은 바뀌지 않습니다.</p>
+        <p class="muted small">설정 탭의 전략·파라미터·마켓·캔들 단위를 그대로 씁니다 (저장하지 않고 바꾼 값도 바로 반영). 마켓·캔들 단위는 여기서 따로 바꿀 수 있고, 그러면 이 화면에서만 쓰이다가 '현재 설정과 같게'를 누르면 다시 설정을 따라갑니다. 백테스트는 실행 설정(v{{ settingsVersion }})을 바꾸지 않습니다.</p>
         <div class="form" v-if="form">
           <div class="field"><span>전략 (현재 설정)</span>
             <div class="note small"><span class="pill" v-if="familyLabel(form.strategy_name)">{{ familyLabel(form.strategy_name) }}</span> <b>{{ form.strategy_name }}</b> · {{ paramText(form.strategy_name, form.strategy_params) }}</div>

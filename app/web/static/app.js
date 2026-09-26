@@ -167,6 +167,12 @@
           : f);
       },
     },
+    watch: {
+      // 백테스트 탭의 마켓·캔들 단위는 설정 탭 값(저장 전 값 포함)을 따라간다 — 전략·파라미터처럼.
+      // 백테스트 탭에서 직접 바꿔 설정과 달라졌으면 그 값을 유지하고, '현재 설정과 같게' 를 누르면 다시 따라간다.
+      "form.marketsText"(value, old) { if (value != null && this.bt.marketsText === old) this.bt.marketsText = value; },
+      "form.candle_interval"(value, old) { if (value != null && this.bt.interval === old) this.bt.interval = value; },
+    },
     methods: {
       // ---------- 유틸
       krw(v) { return v == null || isNaN(v) ? "-" : Math.round(v).toLocaleString("ko-KR") + " 원"; },
