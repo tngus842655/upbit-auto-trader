@@ -299,25 +299,6 @@
           <div class="field"><span>전략 (현재 설정)</span>
             <div class="note small"><span class="pill" v-if="familyLabel(form.strategy_name)">{{ familyLabel(form.strategy_name) }}</span> <b>{{ form.strategy_name }}</b> · {{ paramText(form.strategy_name, form.strategy_params) }}</div>
           </div>
-          <div class="field"><span>함께 비교할 전략 <em>같은 캔들·수수료·슬리피지·리스크 규칙으로 돌려 전략별 성과를 나란히 봅니다. 비교 전략은 각 전략의 기본 파라미터로 돕니다</em></span>
-            <div class="compare-groups">
-              <div v-for="g in strategyGroups" :key="g.family || 'all'" class="row wrap">
-                <a class="fam small" @click.prevent="addCompareFamily(g.family)" :title="g.label + ' 계열 전체 선택'">{{ g.label }}</a>
-                <label class="inline small" v-for="s in g.items" :key="s.name" :title="s.rules">
-                  <input type="checkbox" :checked="s.name === form.strategy_name || !!bt.compare[s.name]" :disabled="s.name === form.strategy_name" @change="toggleCompare(s.name)"> {{ s.name }}
-                </label>
-              </div>
-            </div>
-            <div class="row wrap">
-              <button type="button" class="small" @click="setCompare(true)">전체 선택</button>
-              <button type="button" class="small" @click="setCompare(false)" :disabled="!btCompareList.length">선택 해제</button>
-              <span class="muted small">현재 전략 {{ form.strategy_name }} + 비교 {{ btCompareList.length }}개</span>
-            </div>
-            <div v-if="btCompareDetails.length" class="note small compare-params">
-              <div class="muted">비교 전략은 아래 <b>기본값</b>으로 돕니다 (설정 탭 값과 무관). 공통 조건: 같은 마켓·캔들·기간, 아래 초기 자본·수수료·슬리피지{{ bt.useRisk ? ', 현재 설정의 리스크 규칙' : ', 리스크 규칙 없음' }}</div>
-              <div v-for="c in btCompareDetails" :key="c.name" class="param-row"><b>{{ c.name }}</b> <span class="muted">{{ c.text }}</span></div>
-            </div>
-          </div>
           <div class="field"><span>거래 대상 마켓</span>
             <div class="row">
               <input :value="bt.marketsText" readonly placeholder="코인 검색 버튼으로 선택하세요" style="flex:1" @click="openMarketPicker('backtest')">
@@ -355,7 +336,7 @@
             </label>
           </div>
           <div class="actions wrap">
-            <button class="primary" @click="runBacktest" :disabled="bt.submitting || btRunning || !btMarkets.length || !btPeriods.length">{{ btRunning ? '실행 중…' : '백테스트 실행 (' + btRunCount + '건)' }}</button>
+            <button class="primary" @click="runBacktest" :disabled="bt.submitting || btRunning || !btMarkets.length || !btPeriods.length">{{ btRunning ? '실행 중…' : '백테스트 실행 (' + (btPeriods.length * btMarkets.length) + '건)' }}</button>
             <button v-if="btRunning" class="danger" @click="cancelBacktest">중단</button>
             <select v-if="bt.jobs.length" v-model="bt.selectedJobId" @change="loadBacktestJob(bt.selectedJobId)">
               <option value="">이전 결과 보기…</option>
@@ -374,7 +355,6 @@
         <div v-if="!bt.job" class="muted">아직 실행한 백테스트가 없습니다. 왼쪽에서 기간을 고르고 실행하세요.</div>
         <template v-else>
           <div class="muted small" v-if="btSummary">{{ btSummary }}</div>
-          <div :class="{ 'bt-scroll': btMulti }">
           <table class="bt">
             <thead><tr><th>구간</th><th>마켓</th><th v-if="btMulti">전략</th><th>전략 수익률</th><th>단순 보유</th><th>MDD</th><th>거래</th><th>승률</th><th title="거래 1회당 평균 수익률 (수수료 차감 후)">거래당</th><th>PF</th><th>수수료</th></tr></thead>
             <tbody>
@@ -394,35 +374,8 @@
               </tr>
             </tbody>
           </table>
-          </div>
         </template>
       </div>
-    </section>
-
-    <section class="card" v-if="btMulti && btComparison.length">
-      <h3>전략별 성과 비교 <span class="muted small">같은 캔들 · 수수료 {{ (bt.job.request.fee_rate * 100).toFixed(3) }}% · 슬리피지 {{ (bt.job.request.slippage_rate * 100).toFixed(3) }}%{{ bt.job.request.use_risk ? ' · 리스크 적용' : '' }} · 평균 수익률 순 · 마켓·구간 결과를 합친 값</span></h3>
-      <table class="cmp">
-        <thead><tr>
-          <th>전략</th><th>계열</th><th title="합친 결과 수 (마켓 × 구간)">결과</th><th>평균 수익률</th><th title="단순 보유보다 수익률이 높았던 결과 수">단순 보유보다 나음</th>
-          <th>총 거래</th><th title="전체 거래 기준">승률</th><th title="거래 수로 가중한 거래 1회당 평균 수익률 (수수료 차감 후)">거래당 평균</th>
-          <th>평균 MDD</th><th>최대 연속 손실</th><th>수수료 합계</th><th title="수수료·슬리피지 차감 후 청산 손익 합계">실현 손익 합계</th>
-        </tr></thead>
-        <tbody>
-          <tr v-for="c in btComparison" :key="c.strategy" :class="{ sel: c.strategy === bt.job.request.strategy_name }">
-            <td class="strategy-cell">
-              <b>{{ c.strategy }}</b> <span v-if="paramOrigin(c)" class="pill" :class="{ 'mode-paper': paramOrigin(c) === '현재 설정' }">{{ paramOrigin(c) }}</span>
-              <div v-if="c.strategy_params" class="param-line">{{ paramText(c.strategy, c.strategy_params) }}</div>
-            </td>
-            <td class="small muted">{{ c.family_label || '-' }}</td><td>{{ c.runs }}</td>
-            <td :class="sign(c.avg_return)">{{ pct(c.avg_return) }}</td><td>{{ c.beat_benchmark }} / {{ c.runs }}</td>
-            <td>{{ c.trades }}</td><td>{{ c.win_rate == null ? '-' : pct(c.win_rate, 0) }}</td>
-            <td :class="sign(c.avg_trade_return)">{{ pct(c.avg_trade_return) }}</td>
-            <td class="neg">{{ pct(c.avg_mdd) }}</td><td>{{ c.max_consecutive_losses }}회</td>
-            <td>{{ krw(c.total_fees) }}</td><td :class="sign(c.realized_pnl)">{{ krw(c.realized_pnl) }}</td>
-          </tr>
-        </tbody>
-      </table>
-      <div class="muted small mt">전략 이름 아래가 실제로 돌린 파라미터입니다 — '현재 설정'(강조 표시)은 설정 탭 값, '기본값'은 각 전략의 기본 파라미터입니다. 한 구간의 순위일 뿐이니 여러 해·여러 마켓에서 같은 결과가 나오는지 확인하세요.</div>
     </section>
 
     <section class="card" v-if="btResult">

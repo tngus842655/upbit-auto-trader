@@ -23,10 +23,12 @@ from app.backtest import (
 )
 from app.backtest.metrics import cagr, compute_metrics, max_consecutive_losses, sharpe_ratio
 from app.core.exceptions import StrategyError
+from app.main import build_parser, cmd_backtest
 from app.risk import RiskConfig
 from app.risk.manager import EXIT_TRAILING_STOP
-from app.strategy import MovingAverageCrossStrategy, Strategy
+from app.strategy import STRATEGIES, MovingAverageCrossStrategy, Strategy, create_strategy
 from app.strategy.base import ACTION_COLUMN, REASON_COLUMN, StrategyParams
+from app.strategy.data import save_candles_csv
 from app.trading.portfolio import Trade, floor_quantity
 from tests.test_strategy import make_frame, random_frame
 
@@ -322,3 +324,44 @@ class TestReport:
         curve = pd.read_csv(out / "equity.csv")
         assert list(curve.columns) == ["time", "equity", "benchmark", "in_position"] and len(curve) == 300
         assert make_frame is not None  # 공용 헬퍼 import 확인
+
+
+class TestEveryStrategy:
+    """등록된 모든 전략이 같은 엔진·같은 수수료 규칙으로 백테스트되는지 (전략 추가 시 자동 포함)."""
+
+    @pytest.mark.parametrize("name", list(STRATEGIES))
+    def test_fees_and_realized_pnl_are_consistent(self, name: str) -> None:
+        df = random_frame(600, seed=21)
+        config = BacktestConfig(fee_rate=0.001, slippage_rate=0.0005)
+        result = BacktestEngine(config).run(df, create_strategy(name), market="KRW-TEST", interval="60m")
+        m = result.metrics
+        assert result.config.fee_rate == 0.001 and result.config.slippage_rate == 0.0005
+        # 수수료는 거래마다 매수·매도 양쪽이 빠지고, 실현 손익은 수수료 차감 후 손익의 합
+        assert m.total_fees == pytest.approx(sum(t.entry_fee + t.exit_fee for t in result.trades))
+        assert m.realized_pnl == pytest.approx(sum(t.pnl for t in result.trades))
+        assert m.final_equity == pytest.approx(m.initial_capital + m.realized_pnl)  # 마지막 캔들에 전부 청산
+        if result.trades:
+            assert m.total_fees > 0
+            assert m.avg_trade_return == pytest.approx(sum(t.pnl_pct for t in result.trades) / len(result.trades))
+        json.dumps(result.summary(), allow_nan=False)  # 대시보드·summary.json 에 NaN 이 섞이지 않는다
+
+    @pytest.mark.parametrize("name", list(STRATEGIES))
+    def test_costs_lower_result_but_not_signals(self, name: str) -> None:
+        df = random_frame(500, seed=4)
+        free = BacktestEngine(BacktestConfig(fee_rate=0.0, slippage_rate=0.0)).run(df, create_strategy(name))
+        costly = BacktestEngine(BacktestConfig(fee_rate=0.002, slippage_rate=0.001)).run(df, create_strategy(name))
+        assert free.metrics.total_trades == costly.metrics.total_trades  # 신호는 비용과 무관
+        if free.metrics.total_trades:
+            assert free.metrics.total_fees == 0 and costly.metrics.realized_pnl < free.metrics.realized_pnl
+
+
+async def test_cli_backtest_new_strategy(make_settings, tmp_path, capsys) -> None:
+    csv = save_candles_csv(random_frame(400, seed=2), tmp_path / "KRW-TEST_60m.csv")
+    args = build_parser().parse_args([
+        "backtest", "KRW-TEST", "--interval", "60m", "--start", "2026-01-01", "--end", "2026-01-20",
+        "--csv", str(csv), "--strategy", "macd", "--params", "zero_line_filter=false", "--no-save",
+    ])
+    assert await cmd_backtest(make_settings(), args) == 0
+    text = capsys.readouterr().out
+    assert "백테스트: macd" in text and "'zero_line_filter': False" in text
+    assert "거래당 평균 수익률" in text and "실현 손익" in text

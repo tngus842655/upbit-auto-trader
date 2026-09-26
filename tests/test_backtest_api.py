@@ -15,6 +15,7 @@ from app.api.server import create_app
 from app.core.exceptions import MarketDataError
 from app.database import Database, Repository
 from app.exchange.models import KST, CandleInterval
+from app.strategy import STRATEGIES, create_strategy
 from app.strategy.data import candles_to_dataframe
 from tests.test_api import FakePublicClient
 from tests.test_strategy_data import make_candle
@@ -230,3 +231,17 @@ async def test_dashboard_loader_uses_slow_shared_rate_limiter(make_settings, mon
     assert seen[0]["rate_limiter"] is bt.DASHBOARD_RATE_LIMITER and "rate_limiter" not in seen[1]
     assert bt.DASHBOARD_RATE_LIMITER.limiter("candle").limit == 3  # 초당 3회, 안전 여유 없이 정확히
     assert BacktestRunner(make_settings()).loader is bt.dashboard_load_candles
+
+
+@pytest.mark.parametrize("name", list(STRATEGIES))
+async def test_runner_backtests_every_strategy(make_settings, tmp_path, name) -> None:
+    """대시보드 백테스트는 현재 설정 전략 하나를 돌린다 — 등록된 모든 전략이 기본 파라미터로 동작한다."""
+    runner = BacktestRunner(make_settings(), loader=fake_loader, save_dir=tmp_path)
+    req = BacktestRequest(markets=["KRW-BTC"], strategy_name=name, periods=[{"label": "a", "start": "2026-01-01"}],
+                          save=False)
+    job = await runner.run_sync(req)
+    assert job.status == "done" and job.total == 1 and len(job.results) == 1
+    result = job.results[0]
+    assert "error" not in result and result["strategy"] == name
+    assert result["strategy_params"] == create_strategy(name).params.model_dump()  # 결과 상세에 표시할 파라미터
+    assert {"avg_trade_return", "realized_pnl", "total_fees"} <= set(result["metrics"])

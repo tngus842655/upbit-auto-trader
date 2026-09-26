@@ -96,7 +96,6 @@
         // 백테스트 탭
         bt: { marketsText: "", interval: "", years: {}, recent: { 3: false, 6: false, 12: false }, custom: { enabled: false, start: "", end: "" },
           capital: 1000000, feePct: 0.05, slippagePct: 0.05, useRisk: false, submitting: false, error: null,
-          compare: {},  // 전략 이름 → 함께 돌려 비교할지 (현재 설정 전략은 항상 포함)
           job: null, jobs: [], selectedJobId: "", selected: null, timer: null },
         btDefaults: { years: [], today: "" },
         confirmLive: "", wsConnected: false, ws: null, toast: null, timers: [],
@@ -124,18 +123,10 @@
         return out;
       },
       btResult() { const j = this.bt.job; const r = j && this.bt.selected != null ? j.results[this.bt.selected] : null; return r && !r.error ? r : null; },
-      // 비교에 넣을 전략 (현재 설정 전략 제외, 목록에 있는 이름만)
-      btCompareList() {
-        if (!this.form) return [];
-        return Object.keys(this.bt.compare).filter((n) => this.bt.compare[n] && n !== this.form.strategy_name && n in this.meta.available);
-      },
-      btRunCount() { return this.btPeriods.length * this.btMarkets.length * (1 + this.btCompareList.length); },
-      // 실행 전에 보여 줄 비교 전략의 파라미터 (각 전략의 기본값 — 설정 탭 값과 무관)
-      btCompareDetails() { return this.btCompareList.map((name) => ({ name, text: this.paramText(name, this.defaultParams(name)) })); },
-      btMulti() { const j = this.bt.job; return !!(j && j.request && (j.request.compare_strategies || []).length); },
-      btComparison() { const j = this.bt.job; return (j && j.comparison) || []; },
+      // 전략 비교 기능을 뺀 뒤에도 DB 에 남아 있는 '여러 전략' 작업을 열면 결과 표에 전략 이름 열을 보인다
+      btMulti() { const j = this.bt.job; return !!j && new Set((j.results || []).map((r) => r.strategy).filter(Boolean)).size > 1; },
       btSummary() {
-        const j = this.bt.job; if (!j || !j.results.length || this.btMulti) return "";  // 여러 전략이면 비교표가 대신한다
+        const j = this.bt.job; if (!j || !j.results.length) return "";
         const ok = j.results.filter((r) => !r.error); if (!ok.length) return "";
         const avg = ok.reduce((a, r) => a + r.metrics.total_return, 0) / ok.length;
         const beat = ok.filter((r) => r.metrics.total_return > r.benchmark.total_return).length;
@@ -425,28 +416,6 @@
           })
           .join(" · ");
       },
-      defaultParams(name) {
-        const out = {};
-        for (const f of schemaFields(this.meta.schemas[name])) out[f.name] = f.default;
-        return out;
-      },
-      // 비교표 행의 파라미터 출처: 현재 설정 전략 / 기본값 / (API 로 지정한) 다른 값
-      paramOrigin(row) {
-        if (this.bt.job && row.strategy === this.bt.job.request.strategy_name) return "현재 설정";
-        if (row.default_params === true) return "기본값";
-        return row.default_params === false ? "지정값" : "";
-      },
-      toggleCompare(name) { this.bt.compare = { ...this.bt.compare, [name]: !this.bt.compare[name] }; },
-      setCompare(on) {
-        const next = {};
-        if (on) for (const c of this.meta.catalog || []) next[c.name] = true;
-        this.bt.compare = next;
-      },
-      addCompareFamily(family) {
-        const next = { ...this.bt.compare };
-        for (const c of this.meta.catalog || []) if (c.family === family) next[c.name] = true;
-        this.bt.compare = next;
-      },
       btStatusLabel(s) { return { queued: "대기", running: "실행 중", done: "완료", error: "오류", cancelled: "중단" }[s] || s; },
       async loadBacktestDefaults() {
         try {
@@ -471,7 +440,7 @@
           try { risk = this.riskPayload(); } catch (e) { this.bt.error = e.message; this.notify("리스크 입력값을 확인하세요", "bad"); return; }
         }
         const body = { markets: this.btMarkets, candle_interval: this.bt.interval || this.form.candle_interval, strategy_name: this.form.strategy_name,
-          strategy_params: this.form.strategy_params, compare_strategies: this.btCompareList, periods: this.btPeriods, initial_capital: this.bt.capital,
+          strategy_params: this.form.strategy_params, periods: this.btPeriods, initial_capital: this.bt.capital,
           fee_rate: this.bt.feePct / 100, slippage_rate: this.bt.slippagePct / 100, use_risk: this.bt.useRisk, risk: this.bt.useRisk ? risk : null,
           settings_version: this.settingsVersion };
         this.bt.submitting = true; this.bt.error = null; this.bt.selected = null;

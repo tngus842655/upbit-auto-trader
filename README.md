@@ -23,7 +23,7 @@
 | 1 | Upbit API 연결: 인증, 현재가, 잔고, 캔들, 설정, 테스트 | **완료** |
 | 2 | WebSocket 실시간 현재가·체결·호가·캔들 (자동 재연결) | **완료** |
 | 3 | 전략 엔진: 지표, BUY/SELL/HOLD 신호, 전략 인터페이스, Look-ahead 자동 검사, 전략 12종 — 추세(`ma_cross`·`ema_cross`·`macd`·`ichimoku`)·평균 회귀(`rsi`·`bollinger`·`stochastic`·`cci`·`williams_r`)·돌파(`volume_breakout`)·필터(`adx_trend`·`obv`) ([전략 목록](#전략-목록)) | **완료** |
-| 4 | 백테스트: 다음 캔들 시가 체결, 수수료·슬리피지, 손절·익절, 성과 지표(수익률·연환산·MDD·Sharpe·승률·PF·거래당 평균 수익률·실현 손익), Buy & Hold 비교, 결과 저장, 같은 캔들·수수료로 전략별 성과 비교 | **완료** |
+| 4 | 백테스트: 다음 캔들 시가 체결, 수수료·슬리피지, 손절·익절, 성과 지표(수익률·연환산·MDD·Sharpe·승률·PF·거래당 평균 수익률·실현 손익), Buy & Hold 비교, 결과 저장 | **완료** |
 | 5 | Paper Trading: 캔들 경계마다 닫힌 캔들 확정 → 전략 → 리스크 → 가상 체결(호가 기준), SQLite 기록, 재시작 복구, `run`/`status` | **완료** |
 | 6 | 리스크 관리: 거래당 최대 투자금, 자산 대비 포지션 상한, 최대 포지션 수, 일일 최대 손실, 최대 연속 손실, 손절·익절·추적 손절(실시간 감시), 시세 괴리 방어, 재진입 대기 — 백테스트·모의매매 공용 | **완료** |
 | 7 | 실제 주문 모듈: 주문 API(생성·테스트·조회·취소·주문 가능 정보), LiveBroker(시장가, identifier 멱등, 폴링·취소, 잔고 동기화), 3중 안전장치, 엔진 하트비트·명령 큐(pause/resume/stop/halt), `order-test`/`control` 명령 — 기본 비활성 | **완료** |
@@ -124,8 +124,8 @@ copy .env.example .env      # Windows
 .venv\Scripts\python.exe -m app.main backtest KRW-BTC --interval 60m --start 2026-06-01 --env-risk                      # .env 의 RISK_* 규칙 그대로
 .venv\Scripts\python.exe -m app.main backtest KRW-BTC --interval 60m --start 2026-06-01 --daily-loss-limit 0.02 --max-consecutive-losses 2 --trailing-stop 0.03 --max-order-amount 300000
 .venv\Scripts\python.exe -m app.main backtest KRW-BTC --interval 60m --start 2026-01-01 --csv data/KRW-BTC_60m.csv --capital 500000
-.venv\Scripts\python.exe -m app.main backtest KRW-BTC --interval 240m --start 2025-01-01 --compare all                   # 전략 12종 성과 비교 (같은 캔들·수수료)
-.venv\Scripts\python.exe -m app.main backtest KRW-BTC --interval 60m --start 2025-01-01 --compare macd,bollinger,ichimoku --stop-loss 0.05
+.venv\Scripts\python.exe -m app.main backtest KRW-BTC --interval 240m --start 2025-01-01 --strategy ichimoku                # 신규 전략 (기본 파라미터)
+.venv\Scripts\python.exe -m app.main backtest KRW-BTC --interval 60m --start 2025-01-01 --strategy volume_breakout --stop-loss 0.05 --trailing-stop 0.08
 .venv\Scripts\python.exe -m app.main run --interval 60m                        # 모의매매 (PAPER 전용, Ctrl+C 로 종료)
 .venv\Scripts\python.exe -m app.main run KRW-BTC --interval 1m --duration 600   # 10분만 실행
 .venv\Scripts\python.exe -m app.main status --limit 5                          # 엔진 상태(하트비트)·계좌·포지션·신호·주문·로그
@@ -152,12 +152,12 @@ copy .env.example .env      # Windows
 - 탭: **대시보드**(총 자산·현금·오늘/누적 수익률·MDD·거래 횟수/승률, 자산 곡선, 봇 상태·리스크 상태, 보유 포지션, 현재 전략 신호, 최근 신호/거래/주문/오류) · **설정** · **제어** · **포켓 · 자산 이전** · **로그**. 실시간 갱신은 WebSocket `/ws`(2초), 끊기면 15초 폴링으로 대체한다. 상단에서 PAPER/LIVE 기록을 골라 본다.
 - **설정 탭**: 전략 드롭다운은 계열(추세 추종·평균 회귀·돌파·필터)별로 묶여 있고, 고르면 그 전략의 매수·매도 규칙과 첫 신호까지 필요한 캔들 수가 보이며 **그 전략의 파라미터만** 폼에 나온다(이름·설명·? 도움말은 전략 코드의 파라미터 정의에서 오고, RSI 필터 같은 토글을 끄면 딸린 입력칸이 비활성화된다). 마켓·캔들 단위·전략·파라미터·리스크 수치를 폼(전략 스키마에서 자동 생성, 항목마다 ? 아이콘에 동작 설명, 비율 항목은 0~100 % 로 입력하면 저장 시 소수로 변환)으로 저장하면 `bot_settings` 에 **새 버전**이 쌓인다. 거래 대상 마켓은 직접 입력하지 않고 "🔍 코인 검색" 팝업에서만 고른다(입력창은 읽기 전용) — 업비트 원화 마켓 전체를 현재가·24시간 등락률·24시간 거래대금·유의/주의 표시와 함께 불러와(공개 API, 60초 캐시) 이름·코드로 검색하고 체크박스로 선택하면 선택한 코인이 칩으로 한눈에 보인다(시가총액은 업비트 API 가 제공하지 않아 거래대금으로 대신한다). 엔진은 캔들 경계마다 버전을 확인해 전략·파라미터·리스크는 **다음 캔들부터** 반영하고(즉시 무조건 적용하지 않는다), 마켓·캔들 단위는 "재시작 필요" 로 표시한다. `.env` 의 값은 DB 에 버전이 없을 때의 초기값이며, CLI `run` 의 마켓·전략 인자는 그 실행에서만 DB 값을 덮어쓴다. 변경 이력의 각 버전은 "불러오기"(폼에만 채움, 저장해야 적용)와 "바로 적용"(그 내용을 새 버전으로 즉시 저장)으로 되돌릴 수 있다. 이력은 지워지지 않고 항상 새 버전으로만 쌓인다.
 - **로그 탭**: 최근 100개만 먼저 읽고, 아래로 내리거나 "이전 100개 더 보기"로 이전 로그를 이어서 불러온다(`before_id` 커서). 레벨·날짜 범위(KST)·이벤트/메시지 검색으로 거를 수 있다.
-- **백테스트 탭**: 현재 실행 설정의 전략·파라미터로 과거 캔들 시뮬레이션을 돌린다(실제 주문 없음). 마켓(코인 검색 팝업)·캔들 단위·기간(연도별 체크, 최근 3/6/12개월, 직접 지정 — 여러 개 고르면 구간 × 마켓 조합을 각각 돌려 비교)·초기 자본·**거래소 수수료(편도 %)**·슬리피지·리스크 규칙 적용 여부를 정한다. 작업은 백그라운드로 돌고 진행률이 표시되며, 결과 표(전략 수익률·단순 보유·MDD·거래·승률·거래당 평균·PF·수수료 합계)에서 행을 누르면 자산 곡선(전략 vs 단순 보유)·지표(실현 손익·거래당 평균 수익률 포함)·거래 내역이 보인다. **함께 비교할 전략**을 체크하면(계열 단위·전체 선택 가능) 같은 캔들·수수료·슬리피지·리스크 규칙으로 함께 돌려 "전략별 성과 비교" 표(평균 수익률·단순 보유보다 나은 결과 수·총 거래·승률·거래당 평균·평균 MDD·최대 연속 손실·수수료 합계·실현 손익 합계, 마켓·구간 합산)를 보여 준다. 현재 설정 전략은 설정 탭의 파라미터, 비교 전략은 각자의 기본 파라미터를 쓰며(실행 전 선택 목록 아래와 실행 후 비교표·결과 상세에 전략별로 실제 돌린 파라미터와 '현재 설정'/'기본값' 표시가 나온다), 캔들은 (구간, 마켓)마다 한 번만 받는다. 결과는 DB(`backtest_jobs`, 최근 100개)에 저장되어 서버를 다시 시작해도 "이전 결과 보기" 목록에서 다시 볼 수 있고(삭제 가능), 파일로도 `data/backtests/dash_*` 에 CLI 와 같은 형식(summary.json, trades.csv, equity.csv, signals.csv)으로 남는다.
+- **백테스트 탭**: 현재 실행 설정의 전략·파라미터로 과거 캔들 시뮬레이션을 돌린다(실제 주문 없음). 마켓(코인 검색 팝업)·캔들 단위·기간(연도별 체크, 최근 3/6/12개월, 직접 지정 — 여러 개 고르면 구간 × 마켓 조합을 각각 돌려 비교)·초기 자본·**거래소 수수료(편도 %)**·슬리피지·리스크 규칙 적용 여부를 정한다. 작업은 백그라운드로 돌고 진행률이 표시되며, 결과 표(전략 수익률·단순 보유·MDD·거래·승률·거래당 평균·PF·수수료 합계)에서 행을 누르면 돌린 파라미터, 자산 곡선(전략 vs 단순 보유)·지표(실현 손익·거래당 평균 수익률 포함)·거래 내역이 보인다. 다른 전략을 시험하려면 설정 탭에서 전략을 바꾼 뒤(저장 전 폼 값도 그대로 쓰인다) 다시 실행한다. 결과는 DB(`backtest_jobs`, 최근 100개)에 저장되어 서버를 다시 시작해도 "이전 결과 보기" 목록에서 다시 볼 수 있고(삭제 가능), 파일로도 `data/backtests/dash_*` 에 CLI 와 같은 형식(summary.json, trades.csv, equity.csv, signals.csv)으로 남는다.
 - **제어 탭**: 시작은 `python -m app.main run` 을 분리된 프로세스로 띄운다(로그 `logs/engine-{mode}.log`). 일시정지(신규 매수만 중단, 청산·손절은 계속)/재개/정지/긴급 정지/긴급 정지 해제/설정 다시 읽기는 `bot_commands` 큐로 전달되고 엔진이 2초 안에 처리한다. 강제 종료는 응답 없는 프로세스를 PID 로 내리는 마지막 수단이다. 엔진이 꺼져 있는 동안 큐에 쌓인 명령은 다음 시작 때 무시된다.
 - **LIVE 시작**: 상단 모드를 LIVE 로 바꾸고, `.env` 이중 플래그 + 확인 문구 `REAL-MONEY` 입력 + 브라우저 확인창까지 통과해야 한다. CLI 와 같은 3중 잠금이 그대로 적용되며 웹에서 우회할 수 없다.
 - **포켓 탭**: 봇 API Key 포켓의 잔고 조회, 봇 포켓 → 메인포켓 KRW 이전(봇 키에 "자산이전" 권한). 메인 → 봇 포켓 이전과 포켓 목록은 **메인포켓에서 발급한 "포켓관리" 권한 키**(`UPBIT_POCKET_ACCESS_KEY` / `UPBIT_POCKET_SECRET_KEY`)가 있을 때만 된다. 같은 계정 안의 이동일 뿐이며 외부 출금 API 는 없다. 대시보드로 옮긴 KRW 는 `cash_flows` 에 입출금으로 기록되어 LIVE 누적 수익률과 일일 손실 한도 계산에서 자산 변동으로 빠진다(입출금 조정). 거래소 앱에서 직접 옮긴 자산은 기록되지 않으니 이전은 대시보드로 할 것.
 - **보안**: 기본 `127.0.0.1` 바인드. `DASHBOARD_TOKEN` 을 설정하면 조회를 포함한 모든 `/api/*` 와 `/ws` 에 `X-Auth-Token` 헤더(화면 상단 토큰 칸)가 필요하다(상수 시간 비교, 실패 시 지연, URL 쿼리 토큰은 받지 않고 WebSocket 은 접속 직후 첫 메시지로 전달). 설정하지 않으면 로컬 호스트에서만 허용한다. 변경·제어 API 는 교차 출처(Origin/Sec-Fetch-Site) 요청과 JSON 이 아닌 본문을 거부하므로 외부 사이트의 폼 POST(CSRF)로 명령을 넣을 수 없다. 리버스 프록시 뒤에 둘 때는 프록시가 `X-Forwarded-For` 를 붙여야 하고(uvicorn 은 127.0.0.1 프록시만 신뢰), 그렇지 않으면 원격 요청이 로컬로 보이므로 반드시 토큰을 설정한다. API Key 값은 화면·API 어디에도 나오지 않는다(설정 여부만 표시).
-- API: `GET /api/status|balance|positions|performance|recent|orders|trades|signals|logs|strategy|settings|pockets|markets` (`/api/strategy` 는 전략별 파라미터 스키마·계열·규칙 카탈로그), `GET /api/backtest/defaults|jobs|jobs/{id}` (결과에 전략별 비교표 `comparison`), `POST /api/backtest/jobs` (선택: `compare_strategies: ["macd", {"name": "bollinger", "params": {...}}]`), `POST /api/backtest/jobs/{id}/cancel`, `DELETE /api/backtest/jobs/{id}`, `GET /api/logs?limit&before_id&level&date_from&date_to&q`, `PUT /api/settings`, `POST /api/bot/start|pause|resume|stop|halt|resume-risk|reload|kill`, `POST /api/pockets/transfer`, `WS /ws` — 모두 `?mode=paper|live` 로 기록을 고른다.
+- API: `GET /api/status|balance|positions|performance|recent|orders|trades|signals|logs|strategy|settings|pockets|markets` (`/api/strategy` 는 전략별 파라미터 스키마·계열·규칙 카탈로그), `GET /api/backtest/defaults|jobs|jobs/{id}`, `POST /api/backtest/jobs`, `POST /api/backtest/jobs/{id}/cancel`, `DELETE /api/backtest/jobs/{id}`, `GET /api/logs?limit&before_id&level&date_from&date_to&q`, `PUT /api/settings`, `POST /api/bot/start|pause|resume|stop|halt|resume-risk|reload|kill`, `POST /api/pockets/transfer`, `WS /ws` — 모두 `?mode=paper|live` 로 기록을 고른다.
 
 ### 알림 (Phase 9)
 
@@ -305,12 +305,11 @@ upbit-auto-trader/
 │   │   ├── engine.py           # BacktestConfig / BacktestEngine: 다음 캔들 시가 체결, 슬리피지, 손절·익절, B&H 벤치마크
 │   │   ├── metrics.py          # 총수익률·CAGR·MDD·변동성·Sharpe·Sortino·승률·PF·기대값·거래당 평균 수익률·실현 손익·연속 손실·노출
 │   │   ├── report.py           # 콘솔 보고서, summary.json / trades.csv / equity.csv / signals.csv 저장
-│   │   ├── compare.py          # 전략별 성과 비교: 같은 캔들·설정으로 여러 전략 실행, 전략별 집계표(CLI·대시보드 공용), comparison.csv
 │   │   └── loader.py           # CSV 또는 API(+data/cache) 에서 닫힌 캔들 로드
 │   ├── api/
 │   │   ├── server.py           # FastAPI: 조회·설정·제어·포켓 API, WebSocket /ws, 정적 파일, 토큰/로컬 인증
 │   │   ├── services.py         # 대시보드 조회 서비스(자산·성과·MDD·자산 곡선, 시세 캐시), 포켓 조회·이전, 마켓 카탈로그
-│   │   ├── backtests.py        # 대시보드 백테스트 실행기: 요청 검증, 구간 × 마켓 × 전략 백그라운드 작업, 진행률, 결과 직렬화·저장, 비교표
+│   │   ├── backtests.py        # 대시보드 백테스트 실행기: 요청 검증, 구간 × 마켓 백그라운드 작업, 진행률, 결과 직렬화·저장
 │   │   └── process.py          # 엔진 프로세스 분리 실행·생존 판정(하트비트 45초)·강제 종료
 │   ├── web/static/             # 대시보드 프론트: Vue 3 + Chart.js (빌드 없음) — index.html / app.js / style.css / vendor/
 │   └── notify/
@@ -362,7 +361,7 @@ WebSocket(Phase 2) 흐름:
 6. 신호는 **조건이 새로 성립한 캔들**에서만 낸다. 교차(`ma_cross`)·선 돌파(`rsi`)처럼, 상태 조건(EMA 정배열·구름 위 등)도 거짓 → 참이 된 캔들에서만 BUY/SELL 이고 조건이 이어지는 동안 반복하지 않는다. 그래서 리스크 거부 등으로 건너뛴 신호는 조건이 끊겼다가 다시 성립할 때까지 재시도하지 않는다.
 7. 캔들이 `warmup_periods` 보다 적으면 HOLD(`warmup`). 지표 계산에 필요한 캔들 + 교차 판정용 직전 캔들 1개이며, 테스트가 "정확히 그 개수면 판단 가능, 하나 적으면 HOLD" 를 전략마다 확인한다.
 
-새 전략 추가: `Strategy` 상속 → `name`, `description`, `family`(계열), `rules`(화면용 규칙 요약), `Params`, `warmup_periods`, `evaluate()` 구현 → `app/strategy/__init__.py` 의 `STRATEGIES` 에 등록. 파라미터를 `param(기본값, label=..., description=..., help_text=..., depends_on=...)` 으로 선언하면 대시보드 폼에 이름·설명·도움말이 그대로 나온다. 등록만 하면 공통 테스트(Look-ahead·워밍업·빈 입력)가 자동 적용되고 드롭다운·백테스트 비교 목록에 나타난다.
+새 전략 추가: `Strategy` 상속 → `name`, `description`, `family`(계열), `rules`(화면용 규칙 요약), `Params`, `warmup_periods`, `evaluate()` 구현 → `app/strategy/__init__.py` 의 `STRATEGIES` 에 등록. 파라미터를 `param(기본값, label=..., description=..., help_text=..., depends_on=...)` 으로 선언하면 대시보드 폼에 이름·설명·도움말이 그대로 나온다. 등록만 하면 공통 테스트(Look-ahead·워밍업·빈 입력·수수료 반영 백테스트)가 자동 적용되고 설정 탭 드롭다운에 나타난다.
 
 ### 전략 목록
 
@@ -384,7 +383,7 @@ WebSocket(Phase 2) 흐름:
 - **손절·익절·추적 손절**은 전략이 아니라 리스크 관리(`RISK_STOP_LOSS_PCT` / `RISK_TAKE_PROFIT_PCT` / `RISK_TRAILING_STOP_PCT`, 대시보드 리스크 항목)가 모든 전략에 똑같이 적용한다 — 전략은 진입가를 모르기 때문이다. `volume_breakout` 은 채널 이탈 매도를 끄면(`exit_window=0`) 리스크 규칙으로만 청산되므로 백테스트에서도 리스크 규칙을 켠다.
 - **Look-ahead 주의점**: 일목 구름은 26캔들 **전에** 계산된 선행스팬을 현재 위치에 놓은 값(`shift(+26)`)이고 후행스팬은 쓰지 않는다. 돌파 기준 최고가·최저가·평균 거래량은 현재 캔들을 뺀 직전 N개다. OBV 는 데이터 시작점에 따라 절대값이 평행 이동하므로(실시간 엔진은 최근 캔들만 보관) OBV 와 그 이동평균의 교차만 쓴다. 테스트가 모든 전략에 대해 "뒤에 미래 캔들을 붙여도 과거 행동·지표가 바뀌지 않음" 을 확인한다.
 - **계열(`StrategyFamily`)** 은 향후 Strategy Router 를 위한 구분이다. `strategies_by_family()` 가 계열별 전략 목록을, `adx_trend.trend_strength()` 가 추세 강도 판정(ADX·±DI)을 따로 제공한다. 시장 상태에 따라 전략을 자동으로 고르는 기능은 아직 없다.
-- `backtest --compare` 예시(KRW-BTC 60분봉 2025년 한 해, 수수료·슬리피지 각 0.05%, 기본 파라미터, 리스크 규칙 없음): 12종 중 `bollinger` 만 +8.3%, 나머지는 −7%(`ma_cross`) ~ −66%(`obv`), 단순 보유 −9.9%. 거래가 잦은 전략(`obv` 연 439회, `williams_r` 220회)은 수수료·슬리피지만으로 자본의 15~29% 가 빠졌다 — 짧은 캔들에서는 긴 캔들·긴 기간 파라미터·리스크 규칙과 함께 검증할 것. 한 구간·한 마켓의 결과일 뿐 순위가 유지된다는 뜻이 아니다.
+- 참고(KRW-BTC 60분봉 2025년 한 해를 전략마다 기본 파라미터로 백테스트, 수수료·슬리피지 각 0.05%, 리스크 규칙 없음): `bollinger` 만 +8.3%, 나머지는 −7%(`ma_cross`) ~ −66%(`obv`), 단순 보유 −9.9%. 거래가 잦은 전략(`obv` 연 439회, `williams_r` 220회)은 수수료·슬리피지만으로 자본의 15~29% 가 빠졌다 — 짧은 캔들에서는 긴 캔들·긴 기간 파라미터·리스크 규칙과 함께 검증할 것. 한 구간·한 마켓의 결과일 뿐이다.
 
 백테스트(Phase 4) 체결 규칙:
 
@@ -393,7 +392,7 @@ WebSocket(Phase 2) 흐름:
 3. 롱 온리, 피라미딩 없음: 보유 중 BUY 와 미보유 SELL 은 무시하고 횟수만 센다. 마지막 캔들에서 보유 중이면 종가로 청산해 성과를 확정한다.
 4. Buy & Hold 는 첫 캔들 시가 전액 매수(같은 수수료·슬리피지) → 마지막 종가 청산으로 같은 기준에서 비교한다.
 5. 연환산 계수는 `365.25일 / 캔들 길이`(연중무휴), 무위험 수익률 0. 실행 전 전략 Look-ahead 검사를 강제한다.
-6. 전략 비교(`--compare`, 대시보드 "함께 비교할 전략")는 전략마다 새 포트폴리오·리스크 상태로 **같은 캔들·같은 초기 자본·수수료·슬리피지·리스크 규칙**을 쓴다. 다른 것은 전략과 파라미터뿐이다: 기준 전략은 `--strategy/--params`(대시보드는 설정 탭 값), 비교 전략은 각 전략의 기본 파라미터이며 출력 끝에 전략별 파라미터가 `[기본값]`/`[지정값]` 으로 나온다. 수익률·실현 손익은 모두 수수료·슬리피지를 뺀 값이고, 수수료 합계도 따로 보여 준다. 순위는 평균 총 수익률 순이다.
+6. 수익률·실현 손익·거래당 평균 수익률은 모두 수수료·슬리피지를 뺀 값이고, 수수료 합계도 따로 보여 준다(테스트가 등록된 모든 전략에 대해 확인).
 
 모의매매(Phase 5) 동작:
 

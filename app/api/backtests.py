@@ -1,9 +1,7 @@
 """대시보드 백테스트 실행기 — 현재 실행 설정(전략·파라미터·캔들·리스크)으로 연도별·구간별 백테스트를
 백그라운드로 돌린다.
 
-- 요청 하나 = 작업(job). (구간 × 마켓 × 전략) 조합을 순서대로 돌리며 진행률을 갱신하고, 화면은 폴링으로 결과를 받는다.
-- 전략 비교: ``compare_strategies`` 에 다른 전략을 넣으면 같은 캔들·수수료·슬리피지·리스크로 함께 돌리고,
-  결과에 전략별 비교표(``comparison``)를 붙인다. 캔들은 (구간, 마켓)마다 한 번만 받는다.
+- 요청 하나 = 작업(job). (구간 × 마켓) 조합을 순서대로 돌리며 진행률을 갱신하고, 화면은 폴링으로 결과를 받는다.
 - 캔들은 기존 로더(``app.backtest.loader.load_candles``, data/cache 재사용)로 받고, 엔진은 CLI ``backtest`` 와 같은
   ``BacktestEngine`` 이다. 수수료·슬리피지는 요청값을 그대로 쓴다(거래소 수수료 반영).
 - 실제 주문·DB 기록과 무관하다. 결과는 메모리(최근 작업 20개)와 data/backtests/dash_* 폴더에 남는다.
@@ -25,7 +23,7 @@ from typing import TYPE_CHECKING, Any
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.backtest import BacktestConfig, BacktestEngine, load_candles, save_result, summarize_by_strategy
+from app.backtest import BacktestConfig, BacktestEngine, load_candles, save_result
 from app.backtest.engine import BacktestResult
 from app.config.settings import PROJECT_ROOT, Settings
 from app.core.exceptions import TraderError
@@ -94,30 +92,6 @@ class Period(BaseModel):
         return self
 
 
-class StrategySpec(BaseModel):
-    """비교에 넣을 전략 하나. 문자열(``"macd"``)만 주면 기본 파라미터를 쓴다."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str
-    params: dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="before")
-    @classmethod
-    def _from_name(cls, value: Any) -> Any:
-        return {"name": value} if isinstance(value, str) else value
-
-    @model_validator(mode="after")
-    def _valid(self) -> StrategySpec:
-        try:
-            strategy = create_strategy(self.name, self.params)
-        except TraderError as exc:
-            raise ValueError(str(exc)) from exc
-        self.name = strategy.name
-        self.params = strategy.params.model_dump(mode="json")
-        return self
-
-
 class BacktestRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -125,8 +99,6 @@ class BacktestRequest(BaseModel):
     candle_interval: str = "60m"
     strategy_name: str
     strategy_params: dict[str, Any] = Field(default_factory=dict)
-    # 같은 조건으로 함께 돌려 비교할 다른 전략 (이름당 하나, 기준 전략과 같은 이름은 뺀다)
-    compare_strategies: list[StrategySpec] = Field(default_factory=list, max_length=len(STRATEGIES))
     periods: list[Period] = Field(min_length=1, max_length=24)
     initial_capital: float = Field(default=1_000_000.0, gt=0)
     fee_rate: float = Field(default=0.0005, ge=0, lt=0.1, description="편도 수수료율 (업비트 KRW 마켓 0.0005)")
@@ -166,18 +138,7 @@ class BacktestRequest(BaseModel):
         except TraderError as exc:
             raise ValueError(str(exc)) from exc
         self.strategy_params = strategy.params.model_dump(mode="json")
-        seen = {self.strategy_name}
-        unique: list[StrategySpec] = []
-        for spec in self.compare_strategies:
-            if spec.name not in seen:
-                seen.add(spec.name)
-                unique.append(spec)
-        self.compare_strategies = unique
         return self
-
-    def strategy_runs(self) -> list[tuple[str, dict[str, Any]]]:
-        """돌릴 전략 목록: 기준 전략(현재 설정) 먼저, 그다음 비교 전략."""
-        return [(self.strategy_name, self.strategy_params)] + [(s.name, s.params) for s in self.compare_strategies]
 
     def risk_config(self) -> RiskConfig:
         if self.use_risk and self.risk is not None:
@@ -208,9 +169,7 @@ class BacktestJob:
     @property
     def label(self) -> str:
         req = self.request
-        more = f" 외 {len(req.compare_strategies)}개 전략" if req.compare_strategies else ""
-        return (f"{req.strategy_name}{more} · {', '.join(req.markets)} · {req.candle_interval} · "
-                f"구간 {len(req.periods)}개")
+        return f"{req.strategy_name} · {', '.join(req.markets)} · {req.candle_interval} · 구간 {len(req.periods)}개"
 
     def snapshot(self) -> dict[str, Any]:
         """DB 저장용 스냅샷 (시각은 aware datetime 그대로, request 는 JSON 형태)."""
@@ -231,7 +190,6 @@ class BacktestJob:
             "request": {
                 "markets": req.markets, "candle_interval": req.candle_interval, "strategy_name": req.strategy_name,
                 "strategy_params": req.strategy_params,
-                "compare_strategies": [s.model_dump(mode="json") for s in req.compare_strategies],
                 "periods": [
                     {"label": p.label, "start": p.start.astimezone(KST).isoformat(),
                      "end": p.end.astimezone(KST).isoformat() if p.end else None} for p in req.periods
@@ -245,7 +203,6 @@ class BacktestJob:
         }
         if with_results:
             out["results"] = self.results
-            out["comparison"] = summarize_by_strategy(self.results)
         return out
 
 
@@ -268,7 +225,6 @@ def _record_dict(record: Any, *, with_results: bool) -> dict[str, Any]:
     }
     if with_results:
         out["results"] = list(record.results or [])
-        out["comparison"] = summarize_by_strategy(out["results"])
     return out
 
 
@@ -344,7 +300,7 @@ class BacktestRunner:
 
     def submit(self, request: BacktestRequest) -> BacktestJob:
         job = BacktestJob(id=uuid.uuid4().hex[:12], request=request, created_at=datetime.now(UTC))
-        job.total = len(request.periods) * len(request.markets) * len(request.strategy_runs())
+        job.total = len(request.periods) * len(request.markets)
         self._trim()
         self.jobs[job.id] = job
         self._persist(job)
@@ -407,7 +363,7 @@ class BacktestRunner:
     async def run_sync(self, request: BacktestRequest) -> BacktestJob:
         """테스트·CLI 용: 백그라운드 없이 끝까지 돌린다."""
         job = BacktestJob(id=uuid.uuid4().hex[:12], request=request, created_at=datetime.now(UTC))
-        job.total = len(request.periods) * len(request.markets) * len(request.strategy_runs())
+        job.total = len(request.periods) * len(request.markets)
         self.jobs[job.id] = job
         await self._run(job)
         return job
@@ -438,34 +394,37 @@ class BacktestRunner:
         req = job.request
         interval = CandleInterval.parse(req.candle_interval)
         config = req.backtest_config()
-        runs = req.strategy_runs()
         job_dir = self.save_dir / f"dash_{datetime.now(KST):%Y%m%d_%H%M%S}_{job.id}"
         try:
             for period in req.periods:
                 for market in req.markets:
-                    df: pd.DataFrame | None = None
-                    load_error: str | None = None
                     try:
                         df = await self.loader(self.settings, market, interval, period.start, period.end)
+                        strategy = create_strategy(req.strategy_name, req.strategy_params)
+                        result = await asyncio.to_thread(
+                            BacktestEngine(config).run, df, strategy, market=market, interval=interval
+                        )
+                        saved_to: str | None = None
+                        if req.save:
+                            safe = re.sub(r"[^0-9A-Za-z가-힣_.-]+", "_", period.label).strip("_") or "period"
+                            out = job_dir / f"{safe}_{market}_{interval.value}_{req.strategy_name}"
+                            with contextlib.suppress(Exception):
+                                save_result(result, out)
+                                inside = out.is_relative_to(PROJECT_ROOT)
+                                saved_to = str(out.relative_to(PROJECT_ROOT)) if inside else str(out)
+                        job.results.append(serialize_result(result, period, saved_to=saved_to))
                     except asyncio.CancelledError:
                         raise
                     except (TraderError, ValueError) as exc:
-                        log.warning("백테스트 캔들 로드 실패 %s %s: %s", period.label, market, exc)
-                        load_error = str(exc)
+                        log.warning("백테스트 실패 %s %s: %s", period.label, market, exc)
+                        job.results.append({"period": period.label, "market": market, "interval": interval.value,
+                                            "error": str(exc)})
                     except Exception as exc:  # noqa: BLE001 - 한 조합의 예외가 작업 전체를 죽이지 않게
-                        log.exception("백테스트 캔들 로드 예외 %s %s", period.label, market)
-                        load_error = f"{type(exc).__name__}: {exc}"
-                    # 같은 캔들로 기준 전략 → 비교 전략 순서로 돌린다 (캔들을 못 받았으면 전략마다 실패 행)
-                    for name, params in runs:
-                        if df is None:
-                            job.results.append({"period": period.label, "market": market, "interval": interval.value,
-                                                "strategy": name, "error": load_error or "캔들 없음"})
-                        else:
-                            job.results.append(
-                                await self._run_one(req, df, name, params, period, market, interval, config, job_dir)
-                            )
-                        job.progress += 1
-                        self._persist(job)
+                        log.exception("백테스트 예외 %s %s", period.label, market)
+                        job.results.append({"period": period.label, "market": market, "interval": interval.value,
+                                            "error": f"{type(exc).__name__}: {exc}"})
+                    job.progress += 1
+                    self._persist(job)
             job.status = "done"
         except asyncio.CancelledError:
             job.status = "cancelled"
@@ -477,30 +436,3 @@ class BacktestRunner:
         finally:
             job.finished_at = datetime.now(UTC)
             self._persist(job)
-
-    async def _run_one(
-        self, req: BacktestRequest, df: pd.DataFrame, name: str, params: dict[str, Any], period: Period, market: str,
-        interval: CandleInterval, config: BacktestConfig, job_dir: Path,
-    ) -> dict[str, Any]:
-        """전략 하나를 돌려 결과 행(실패하면 ``error`` 행)을 돌려준다."""
-        try:
-            strategy = create_strategy(name, params)
-            result = await asyncio.to_thread(BacktestEngine(config).run, df, strategy, market=market, interval=interval)
-            saved_to: str | None = None
-            if req.save:
-                safe = re.sub(r"[^0-9A-Za-z가-힣_.-]+", "_", period.label).strip("_") or "period"
-                out = job_dir / f"{safe}_{market}_{interval.value}_{name}"
-                with contextlib.suppress(Exception):
-                    save_result(result, out)
-                    inside = out.is_relative_to(PROJECT_ROOT)
-                    saved_to = str(out.relative_to(PROJECT_ROOT)) if inside else str(out)
-            return serialize_result(result, period, saved_to=saved_to)
-        except asyncio.CancelledError:
-            raise
-        except (TraderError, ValueError) as exc:
-            log.warning("백테스트 실패 %s %s %s: %s", period.label, market, name, exc)
-            error = str(exc)
-        except Exception as exc:  # noqa: BLE001 - 한 조합의 예외가 작업 전체를 죽이지 않게
-            log.exception("백테스트 예외 %s %s %s", period.label, market, name)
-            error = f"{type(exc).__name__}: {exc}"
-        return {"period": period.label, "market": market, "interval": interval.value, "strategy": name, "error": error}
