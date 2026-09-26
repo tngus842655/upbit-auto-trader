@@ -130,6 +130,8 @@
         return Object.keys(this.bt.compare).filter((n) => this.bt.compare[n] && n !== this.form.strategy_name && n in this.meta.available);
       },
       btRunCount() { return this.btPeriods.length * this.btMarkets.length * (1 + this.btCompareList.length); },
+      // 실행 전에 보여 줄 비교 전략의 파라미터 (각 전략의 기본값 — 설정 탭 값과 무관)
+      btCompareDetails() { return this.btCompareList.map((name) => ({ name, text: this.paramText(name, this.defaultParams(name)) })); },
       btMulti() { const j = this.bt.job; return !!(j && j.request && (j.request.compare_strategies || []).length); },
       btComparison() { const j = this.bt.job; return (j && j.comparison) || []; },
       btSummary() {
@@ -411,6 +413,29 @@
       removeBtMarket(code) { this.bt.marketsText = this.btMarkets.filter((m) => m !== code).join(","); },
       // ---------- 백테스트
       paramsSummary(params) { return Object.entries(params || {}).map(([k, v]) => `${k}=${v}`).join(", "); },
+      // 파라미터를 화면용 한 줄로: 스키마 이름(label) 우선, 불리언은 켜짐/꺼짐, 꺼진 토글에 딸린 값은 쓰이지 않으므로 뺀다
+      paramText(name, params) {
+        const fields = schemaFields(this.meta.schemas[name]);
+        if (!fields.length) return this.paramsSummary(params);
+        const values = params || {};
+        return fields.filter((f) => !(f.dependsOn && !(values[f.dependsOn] ?? true)))
+          .map((f) => {
+            const v = values[f.name] ?? f.default;
+            return `${f.label || f.name} ${f.type === "boolean" ? (v ? "켜짐" : "꺼짐") : v}`;
+          })
+          .join(" · ");
+      },
+      defaultParams(name) {
+        const out = {};
+        for (const f of schemaFields(this.meta.schemas[name])) out[f.name] = f.default;
+        return out;
+      },
+      // 비교표 행의 파라미터 출처: 현재 설정 전략 / 기본값 / (API 로 지정한) 다른 값
+      paramOrigin(row) {
+        if (this.bt.job && row.strategy === this.bt.job.request.strategy_name) return "현재 설정";
+        if (row.default_params === true) return "기본값";
+        return row.default_params === false ? "지정값" : "";
+      },
       toggleCompare(name) { this.bt.compare = { ...this.bt.compare, [name]: !this.bt.compare[name] }; },
       setCompare(on) {
         const next = {};

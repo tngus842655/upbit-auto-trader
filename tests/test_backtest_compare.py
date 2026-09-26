@@ -59,13 +59,14 @@ def test_fees_lower_every_strategy_result() -> None:
 
 
 def test_summarize_by_strategy_aggregates_markets_and_skips_errors() -> None:
+    macd_defaults = create_strategy("macd").params.model_dump(mode="json")
     rows = [
-        {"strategy": "macd", "metrics": {
+        {"strategy": "macd", "strategy_params": macd_defaults, "metrics": {
             "total_return": 0.10, "total_trades": 4, "wins": 3, "avg_trade_return": 0.03, "mdd": -0.05,
             "max_consecutive_losses": 1, "total_fees": 100.0, "realized_pnl": 1000.0,
             "final_equity": 1_001_000.0, "initial_capital": 1_000_000.0},
          "benchmark": {"total_return": 0.05}},
-        {"strategy": "macd", "metrics": {
+        {"strategy": "macd", "strategy_params": dict(macd_defaults), "metrics": {
             "total_return": -0.02, "total_trades": 6, "wins": 1, "avg_trade_return": -0.01, "mdd": -0.20,
             "max_consecutive_losses": 4, "total_fees": 150.0, "realized_pnl": -200.0},
          "benchmark": {"total_return": 0.01}},
@@ -85,8 +86,13 @@ def test_summarize_by_strategy_aggregates_markets_and_skips_errors() -> None:
     assert macd["worst_mdd"] == -0.20 and macd["avg_mdd"] == pytest.approx(-0.125)
     assert macd["max_consecutive_losses"] == 4 and macd["total_fees"] == 250.0 and macd["realized_pnl"] == 800.0
     assert macd["family"] == "TREND" and macd["family_label"] == "추세 추종"
+    assert macd["strategy_params"] == macd_defaults and macd["default_params"] is True  # 돌린 파라미터와 출처
     rsi = table[0]
     assert rsi["realized_pnl"] == 200_000.0 and rsi["avg_trade_return"] is None and rsi["win_rate"] is None
+    assert rsi["strategy_params"] is None and rsi["default_params"] is None  # 파라미터 기록이 없는 옛 결과
+    # 같은 전략이 결과마다 다른 파라미터로 돌았으면 하나로 말할 수 없으므로 None
+    mixed = summarize_by_strategy([{**rows[0]}, {**rows[1], "strategy_params": {**macd_defaults, "fast_period": 5}}])
+    assert mixed[0]["strategy_params"] is None
     json.dumps(table, allow_nan=False)  # 대시보드 JSON 응답에 NaN·무한대가 섞이지 않는다
     assert summarize_by_strategy([]) == []
 
@@ -98,6 +104,7 @@ def test_format_and_save_comparison(tmp_path) -> None:
     text = format_comparison(results)
     assert "전략 비교: KRW-TEST 60m" in text and "수수료 0.050%" in text and "단순 보유" in text
     assert all(name in text for name in ("macd", "bollinger", "obv"))
+    assert "전략별 파라미터" in text and "[기본값] fast_period=12, slow_period=26" in text
     out = save_comparison(results, tmp_path / "cmp")
     table = pd.read_csv(out / "comparison.csv")
     assert set(table["strategy"]) == {"macd", "bollinger", "obv"} and "total_fees" in table.columns
@@ -115,7 +122,10 @@ async def test_cli_backtest_compare(make_settings, tmp_path, capsys) -> None:
     assert await cmd_backtest(make_settings(), args) == 0
     text = capsys.readouterr().out
     assert "전략 비교: KRW-TEST 60m" in text
-    assert text.count("ma_cross ") == 1  # 기준 전략은 한 번만 (비교 목록의 같은 이름은 빠진다)
+    # 기준 전략은 한 번만 (비교 목록의 같은 이름은 빠진다): 비교표 한 줄 + 파라미터 한 줄
+    assert text.count("ma_cross ") == 2
+    assert "[지정값] short_window=5, long_window=20" in text  # --params 로 넘긴 기준 전략
+    assert "[기본값] fast_period=12" in text  # 비교 전략은 기본 파라미터
     saved = list((tmp_path / "out").glob("*_compare"))
     assert len(saved) == 1 and (saved[0] / "comparison.csv").exists() and (saved[0] / "ma_cross").is_dir()
     summary = json.loads((saved[0] / "ma_cross" / "summary.json").read_text(encoding="utf-8"))
@@ -171,6 +181,11 @@ async def test_runner_runs_every_strategy_on_same_candles(make_settings, tmp_pat
     assert [c["name"] for c in body["request"]["compare_strategies"]] == ["macd", "bollinger"]
     assert {row["strategy"] for row in body["comparison"]} == {"ma_cross", "macd", "bollinger"}
     assert all(row["runs"] == 1 for row in body["comparison"])
+    # 비교표마다 실제로 돌린 파라미터와 출처: 현재 설정(ma_cross, 기본값 아님) / 비교 전략(기본값)
+    by_name = {row["strategy"]: row for row in body["comparison"]}
+    assert by_name["ma_cross"]["strategy_params"]["short_window"] == 5
+    assert by_name["ma_cross"]["default_params"] is False
+    assert by_name["macd"]["default_params"] is True and by_name["macd"]["strategy_params"]["signal_period"] == 9
     json.dumps(body, allow_nan=False)
     # 서버 재시작 뒤 DB 에서 읽어도 비교표가 붙는다
     fresh = BacktestRunner(make_settings(), loader=counting_loader, save_dir=tmp_path, repo=repo)

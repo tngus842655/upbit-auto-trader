@@ -74,6 +74,14 @@ def _mean(values: Iterable[float | None]) -> float | None:
     return sum(vals) / len(vals) if vals else None
 
 
+def is_default_params(name: str, params: Mapping[str, Any] | None) -> bool | None:
+    """``params`` 가 그 전략의 기본 파라미터와 같은지 (모르는 전략·파라미터 없음이면 None)."""
+    cls = STRATEGIES.get(name)
+    if cls is None or params is None:
+        return None
+    return cls().params.model_dump(mode="json") == dict(params)
+
+
 def _realized(metrics: Mapping[str, Any]) -> float:
     """실현 손익. 이 지표가 생기기 전에 저장된 결과는 최종 자산 − 초기 자본(마지막 캔들에 전부 청산하므로 같다)."""
     value = _num(metrics.get("realized_pnl"))
@@ -90,6 +98,7 @@ def summarize_by_strategy(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, A
     - ``trades`` / ``win_rate``: 전체 거래 수와 전체 거래 기준 승률
     - ``avg_trade_return``: 거래 수로 가중한 거래당 평균 수익률
     - ``max_consecutive_losses``: 결과 중 최댓값, ``total_fees`` / ``realized_pnl``: 합계 (수수료 차감 후)
+    - ``strategy_params``: 이 전략을 돌린 파라미터 (결과마다 다르면 None), ``default_params``: 그 값이 기본값인지
     """
     groups: dict[str, list[Mapping[str, Any]]] = {}
     for row in rows:
@@ -110,10 +119,14 @@ def summarize_by_strategy(rows: Iterable[Mapping[str, Any]]) -> list[dict[str, A
         mdds = [_num(m.get("mdd")) for m in metrics]
         cls = STRATEGIES.get(name)
         family = cls.family if cls is not None else None
+        params = [r.get("strategy_params") for r in items]
+        same_params = params[0] if params[0] is not None and all(p == params[0] for p in params) else None
         out.append({
             "strategy": name,
             "family": family.value if family else None,
             "family_label": family.label if family else None,
+            "strategy_params": same_params,
+            "default_params": is_default_params(name, same_params),
             "runs": len(items),
             "avg_return": _mean(returns),
             "avg_benchmark": _mean(bench_returns),
@@ -171,6 +184,12 @@ def format_comparison(results: Sequence[BacktestResult]) -> str:
         f"  {'단순 보유(B&H)':<14} {b.total_trades:>5} {'-':>7} {_pct(b.total_return):>9} {'-':>8} {_pct(b.mdd):>8} "
         f"{'-':>5} {b.total_fees:>10,.0f} {b.realized_pnl:>12,.0f}"
     )
+    lines.append("")
+    lines.append("  전략별 파라미터 (기본값 = 전략 코드의 기본 파라미터, 지정값 = --strategy/--params 로 넘긴 값):")
+    for r in results:
+        origin = {True: "기본값", False: "지정값"}.get(is_default_params(r.strategy_name, r.strategy_params), "")
+        params = ", ".join(f"{k}={v}" for k, v in r.strategy_params.items())
+        lines.append(f"  {r.strategy_name:<16} [{origin}] {params}")
     lines.append("")
     lines.append("  ※ 수익률·실현손익은 수수료·슬리피지를 뺀 값이다. 한 구간의 순위일 뿐 미래 수익을 보장하지 않는다.")
     return "\n".join(lines)

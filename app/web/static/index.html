@@ -297,9 +297,9 @@
         <p class="muted small">현재 실행 설정 <b>v{{ settingsVersion }}</b>의 전략·파라미터를 그대로 씁니다. 설정 탭에서 바꿔 저장하면 여기에도 반영됩니다. 마켓·캔들 단위·기간·수수료는 여기서 따로 정할 수 있고 실행 설정은 바뀌지 않습니다.</p>
         <div class="form" v-if="form">
           <div class="field"><span>전략 (현재 설정)</span>
-            <div class="note small"><span class="pill" v-if="familyLabel(form.strategy_name)">{{ familyLabel(form.strategy_name) }}</span> {{ form.strategy_name }} · {{ paramsSummary(form.strategy_params) }}</div>
+            <div class="note small"><span class="pill" v-if="familyLabel(form.strategy_name)">{{ familyLabel(form.strategy_name) }}</span> <b>{{ form.strategy_name }}</b> · {{ paramText(form.strategy_name, form.strategy_params) }}</div>
           </div>
-          <div class="field"><span>함께 비교할 전략 <em>같은 캔들·수수료·슬리피지·리스크 규칙으로 돌려 전략별 성과를 나란히 봅니다 (각 전략의 기본 파라미터)</em></span>
+          <div class="field"><span>함께 비교할 전략 <em>같은 캔들·수수료·슬리피지·리스크 규칙으로 돌려 전략별 성과를 나란히 봅니다. 비교 전략은 각 전략의 기본 파라미터로 돕니다</em></span>
             <div class="compare-groups">
               <div v-for="g in strategyGroups" :key="g.family || 'all'" class="row wrap">
                 <a class="fam small" @click.prevent="addCompareFamily(g.family)" :title="g.label + ' 계열 전체 선택'">{{ g.label }}</a>
@@ -312,6 +312,10 @@
               <button type="button" class="small" @click="setCompare(true)">전체 선택</button>
               <button type="button" class="small" @click="setCompare(false)" :disabled="!btCompareList.length">선택 해제</button>
               <span class="muted small">현재 전략 {{ form.strategy_name }} + 비교 {{ btCompareList.length }}개</span>
+            </div>
+            <div v-if="btCompareDetails.length" class="note small compare-params">
+              <div class="muted">비교 전략은 아래 <b>기본값</b>으로 돕니다 (설정 탭 값과 무관). 공통 조건: 같은 마켓·캔들·기간, 아래 초기 자본·수수료·슬리피지{{ bt.useRisk ? ', 현재 설정의 리스크 규칙' : ', 리스크 규칙 없음' }}</div>
+              <div v-for="c in btCompareDetails" :key="c.name" class="param-row"><b>{{ c.name }}</b> <span class="muted">{{ c.text }}</span></div>
             </div>
           </div>
           <div class="field"><span>거래 대상 마켓</span>
@@ -404,8 +408,12 @@
           <th>평균 MDD</th><th>최대 연속 손실</th><th>수수료 합계</th><th title="수수료·슬리피지 차감 후 청산 손익 합계">실현 손익 합계</th>
         </tr></thead>
         <tbody>
-          <tr v-for="c in btComparison" :key="c.strategy" :class="{ sel: c.strategy === bt.job.request.strategy_name }" :title="c.strategy === bt.job.request.strategy_name ? '현재 설정 전략' : ''">
-            <td><b>{{ c.strategy }}</b></td><td class="small muted">{{ c.family_label || '-' }}</td><td>{{ c.runs }}</td>
+          <tr v-for="c in btComparison" :key="c.strategy" :class="{ sel: c.strategy === bt.job.request.strategy_name }">
+            <td class="strategy-cell">
+              <b>{{ c.strategy }}</b> <span v-if="paramOrigin(c)" class="pill" :class="{ 'mode-paper': paramOrigin(c) === '현재 설정' }">{{ paramOrigin(c) }}</span>
+              <div v-if="c.strategy_params" class="param-line">{{ paramText(c.strategy, c.strategy_params) }}</div>
+            </td>
+            <td class="small muted">{{ c.family_label || '-' }}</td><td>{{ c.runs }}</td>
             <td :class="sign(c.avg_return)">{{ pct(c.avg_return) }}</td><td>{{ c.beat_benchmark }} / {{ c.runs }}</td>
             <td>{{ c.trades }}</td><td>{{ c.win_rate == null ? '-' : pct(c.win_rate, 0) }}</td>
             <td :class="sign(c.avg_trade_return)">{{ pct(c.avg_trade_return) }}</td>
@@ -414,11 +422,12 @@
           </tr>
         </tbody>
       </table>
-      <div class="muted small mt">비교 전략은 각자의 기본 파라미터, 현재 설정 전략(강조 표시)은 설정 탭의 파라미터로 돌렸습니다. 한 구간의 순위일 뿐이니 여러 해·여러 마켓에서 같은 결과가 나오는지 확인하세요.</div>
+      <div class="muted small mt">전략 이름 아래가 실제로 돌린 파라미터입니다 — '현재 설정'(강조 표시)은 설정 탭 값, '기본값'은 각 전략의 기본 파라미터입니다. 한 구간의 순위일 뿐이니 여러 해·여러 마켓에서 같은 결과가 나오는지 확인하세요.</div>
     </section>
 
     <section class="card" v-if="btResult">
       <h3>{{ btResult.period }} · {{ btResult.market }} · {{ btResult.interval }}<template v-if="btResult.strategy"> · {{ btResult.strategy }}</template> <span class="muted small">{{ fmtTime(btResult.start) }} ~ {{ fmtTime(btResult.end) }} · 캔들 {{ btResult.candles }}개</span></h3>
+      <div v-if="btResult.strategy_params" class="muted small param-line mb">파라미터: {{ paramText(btResult.strategy, btResult.strategy_params) }}</div>
       <div class="kpis bt">
         <div class="kpi"><span class="k">총 수익률</span><span class="v" :class="sign(btResult.metrics.total_return)">{{ pct(btResult.metrics.total_return) }}</span><span class="s">단순 보유 {{ pct(btResult.benchmark.total_return) }}</span></div>
         <div class="kpi"><span class="k">최종 자산</span><span class="v">{{ krw(btResult.metrics.final_equity) }}</span><span class="s">초기 {{ krw(btResult.metrics.initial_capital) }}</span></div>
